@@ -7,6 +7,6 @@ license       = "GPLv3"
 
 # Dependencies
 
-requires "nim >= 0.17.3", "nimSHA2", "base58", "hex"
+requires "nim >= 0.17.3", "nimSHA2", "base58"
 
 bin = @["ipfs_client"]

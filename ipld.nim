@@ -1,4 +1,4 @@
-import nimSHA2, streams, multiformat, base58.bitcoin, cbor, hex
+import nimSHA2, streams, multiformats, base58.bitcoin, cbor, hex
 
 type Cid* = object
   digest*: string
@@ -33,6 +33,8 @@ proc toBin(cid: Cid): string =
 
 proc toRaw*(cid: Cid): string =
   MultibaseTag.Identity.char & cid.toBIn
+
+proc toCbor*(cid: Cid): CborNode = newCborBytes cid.toRaw
 
 proc toHex*(cid: Cid): string =
   MultibaseTag.Base16.char & hex.encode(cid.toBin)
@@ -76,6 +78,13 @@ proc CidSha256*(data: string; codec = MulticodecTag.Raw): Cid =
     codec: codec,
     ver: 1,
     logicalLen: data.len)
+
+proc verify*(cid: Cid; data: string): bool =
+  case cid.hash
+  of MulticodecTag.Sha2_256:
+    result = cid.digest == $computeSHA256(data)
+  else:
+    raise newException(ValueError, "unknown hash type " & $cid.hash)
 
 type Dag* = CborNode
 
