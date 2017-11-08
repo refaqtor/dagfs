@@ -1,40 +1,40 @@
 import asyncdispatch, asyncfile, streams, strutils, os, ipld, cbor, multiformats, unixfs
 
 type
-  Store* = ref StoreObj
-  StoreObj* = object of RootObj
-    closeImpl*: proc (s: Store) {.nimcall, gcsafe.}
-    putRawImpl*: proc (s: Store; blk: string): Future[Cid] {.nimcall, gcsafe.}
-    getRawImpl*: proc (s: Store; cid: Cid): Future[string] {.nimcall, gcsafe.}
-    putDagImpl*: proc (s: Store; dag: Dag): Future[Cid] {.nimcall, gcsafe.}
-    getDagImpl*: proc (s: Store; cid: Cid): Future[Dag] {.nimcall, gcsafe.}
-    fileStreamImpl*: proc (s: Store; cid: Cid; fut: FutureStream[string]): Future[void] {.nimcall, gcsafe.}
+  IpldStore* = ref IpldStoreObj
+  IpldStoreObj* = object of RootObj
+    closeImpl*: proc (s: IpldStore) {.nimcall, gcsafe.}
+    putRawImpl*: proc (s: IpldStore; blk: string): Future[Cid] {.nimcall, gcsafe.}
+    getRawImpl*: proc (s: IpldStore; cid: Cid): Future[string] {.nimcall, gcsafe.}
+    putDagImpl*: proc (s: IpldStore; dag: Dag): Future[Cid] {.nimcall, gcsafe.}
+    getDagImpl*: proc (s: IpldStore; cid: Cid): Future[Dag] {.nimcall, gcsafe.}
+    fileStreamImpl*: proc (s: IpldStore; cid: Cid; fut: FutureStream[string]): Future[void] {.nimcall, gcsafe.}
 
-proc close*(s: Store) =
+proc close*(s: IpldStore) =
   ## Close active store resources.
   if not s.closeImpl.isNil: s.closeImpl(s)
 
-proc putRaw*(s: Store; blk: string): Future[Cid] {.async.} =
+proc putRaw*(s: IpldStore; blk: string): Future[Cid] {.async.} =
   ## Place a raw block to the store.
   result = await s.putRawImpl(s, blk)
 
-proc getRaw*(s: Store; cid: Cid): Future[string] {.async.} =
+proc getRaw*(s: IpldStore; cid: Cid): Future[string] {.async.} =
   ## Retrieve a raw block from the store.
   result = await s.getRawImpl(s, cid)
 
-proc putDag*(s: Store; dag: Dag): Future[Cid] {.async.} =
+proc putDag*(s: IpldStore; dag: Dag): Future[Cid] {.async.} =
   ## Place an IPLD node in the store.
   result = await s.putDagImpl(s, dag)
 
-proc getDag*(s: Store; cid: Cid): Future[Dag] {.async.} =
+proc getDag*(s: IpldStore; cid: Cid): Future[Dag] {.async.} =
   ## Retrieve an IPLD node from the store.
   result = await s.getDagImpl(s, cid)
 
-proc fileStream*(s: Store; cid: Cid; fut: FutureStream[string]): Future[void] {.async.} =
+proc fileStream*(s: IpldStore; cid: Cid; fut: FutureStream[string]): Future[void] {.async.} =
   ## Asynchronously stream a file from a CID list.
   await s.fileStreamImpl(s, cid, fut)
 
-proc addFile*(store: Store; path: string): (Cid, int) =
+proc addFile*(store: IpldStore; path: string): (Cid, int) =
   ## Add a file to the store and return the CID and file size.
   let
     fStream = newFileStream(path, fmRead)
@@ -54,7 +54,7 @@ proc addFile*(store: Store; path: string): (Cid, int) =
     result[0] = waitFor store.putDag(fRoot)
   result[1] = fSize
 
-proc addDir*(store: Store; dirPath: string): Cid =
+proc addDir*(store: IpldStore; dirPath: string): Cid =
   var dRoot = newUnixFsRoot()
   for kind, path in walkDir dirPath:
     case kind
@@ -75,7 +75,7 @@ proc addDir*(store: Store; dirPath: string): Cid =
 type
   FileStore* = ref FileStoreObj
     ## A store that writes nodes and leafs as files.
-  FileStoreObj = object of StoreObj
+  FileStoreObj = object of IpldStoreObj
     root: string
 
 proc parentAndFile(fs: FileStore; cid: Cid): (string, string) =
@@ -87,7 +87,6 @@ proc putToFile(fs: FileStore; cid: Cid; blk: string) {.async.} =
   let (dir, path) = fs.parentAndFile cid
   if not existsDir dir:
     createDir dir
-  echo "put to path ", path
   if not existsFile path:
     let
       tmp = fs.root / "tmp"
@@ -96,12 +95,12 @@ proc putToFile(fs: FileStore; cid: Cid; blk: string) {.async.} =
     close file
     moveFile(tmp, path)
 
-proc fsPutRaw(s: Store; blk: string): Future[Cid] {.async.} =
+proc fsPutRaw(s: IpldStore; blk: string): Future[Cid] {.async.} =
   var fs = FileStore(s)
   let cid = blk.CidSha256
   await fs.putToFile(cid, blk)
 
-proc fsGetRaw(s: Store; cid: Cid): Future[string] {.async.} =
+proc fsGetRaw(s: IpldStore; cid: Cid): Future[string] {.async.} =
   var fs = FileStore(s)
   let (_, path) = fs.parentAndFile cid
   if existsFile path:
@@ -113,7 +112,7 @@ proc fsGetRaw(s: Store; cid: Cid): Future[string] {.async.} =
   else:
     result = nil
 
-proc fsPutDag(s: Store; dag: Dag): Future[Cid] {.async.} =
+proc fsPutDag(s: IpldStore; dag: Dag): Future[Cid] {.async.} =
   var fs = FileStore(s)
   let
     blk = dag.toBinary
@@ -121,7 +120,7 @@ proc fsPutDag(s: Store; dag: Dag): Future[Cid] {.async.} =
   await fs.putToFile(cid, blk)
   result = cid
 
-proc fsGetDag(s: Store; cid: Cid): Future[Dag] {.async.} =
+proc fsGetDag(s: IpldStore; cid: Cid): Future[Dag] {.async.} =
   var fs = FileStore(s)
   let
     raw = await fs.fsGetRaw(cid)
@@ -149,7 +148,7 @@ proc fsFileStreamRecurs(fs: FileStore; cid: Cid; fut: FutureStream[string]) {.as
       await fs.fsFileStreamRecurs(cid, fut)
   else: discard
 
-proc fsFileStream(s: Store; cid: Cid; fut: FutureStream[string]) {.async.} =
+proc fsFileStream(s: IpldStore; cid: Cid; fut: FutureStream[string]) {.async.} =
   var fs = FileStore(s)
   await fs.fsFileStreamRecurs(cid, fut)
   complete fut

@@ -1,15 +1,15 @@
 import asyncdispatch, asyncstreams, httpclient, json, base58.bitcoin, streams, nimSHA2, cbor, tables
 
-import ipld, multiformats, store
+import ipld, multiformats, ipldstore
 
 type
   IpfsStore* = ref IpfsStoreObj
-  IpfsStoreObj = object of StoreObj
+  IpfsStoreObj = object of IpldStoreObj
     ## IPFS daemon client.
     http: AsyncHttpClient
     baseUrl: string
 
-proc ipfsClose(s: Store) =
+proc ipfsClose(s: IpldStore) =
   var ipfs = IpfsStore(s)
   close ipfs.http
 
@@ -33,7 +33,7 @@ Content-Type: application/octet-stream
   # You can tell its written in Go when the JSON keys had to be capitalized
   result = (js["Key"].getStr, js["Size"].getNum.int)
 
-proc ipfsPutRaw(s: Store; blk: string): Future[Cid] {.async.} =
+proc ipfsPutRaw(s: IpldStore; blk: string): Future[Cid] {.async.} =
   var ipfs = IpfsStore(s)
   let
     cid = blk.CidSha256
@@ -45,7 +45,7 @@ proc ipfsPutRaw(s: Store; blk: string): Future[Cid] {.async.} =
     raise newException(SystemError, "IPFS daemon returned a size mismatch")
   result = cid
 
-proc ipfsPutDag(s: Store; dag: Dag): Future[Cid] {.async.} =
+proc ipfsPutDag(s: IpldStore; dag: Dag): Future[Cid] {.async.} =
   var ipfs = IpfsStore(s)
   let
     blk = dag.toBinary
@@ -58,14 +58,14 @@ proc ipfsPutDag(s: Store; dag: Dag): Future[Cid] {.async.} =
     raise newException(SystemError, "IPFS daemon returned a size mismatch")
   result = cid
 
-proc ipfsGetRaw(s: Store; cid: Cid): Future[string] {.async.} =
+proc ipfsGetRaw(s: IpldStore; cid: Cid): Future[string] {.async.} =
   var ipfs = IpfsStore(s)
   let
     url = ipfs.baseUrl & "/api/v0/block/get?arg=" & $cid
     resp = await ipfs.http.request(url)
   result = await resp.body
 
-proc ipfsGetDag(s: Store; cid: Cid): Future[Dag] {.async.} =
+proc ipfsGetDag(s: IpldStore; cid: Cid): Future[Dag] {.async.} =
   var ipfs = IpfsStore(s)
   let
     blk = await ipfs.ipfsGetRaw(cid)
@@ -82,7 +82,7 @@ proc ipfsFileStreamRecurse(ipfs: IpfsStore; cid: Cid; fut: FutureStream[string])
       await ipfs.fileStream(linkCid, fut)
   else: discard
 
-proc ipfsFileStream(s: Store; cid: Cid; fut: FutureStream[string]) {.async.} =
+proc ipfsFileStream(s: IpldStore; cid: Cid; fut: FutureStream[string]) {.async.} =
   var ipfs = IpfsStore(s)
   await ipfs.ipfsFileStreamRecurse(cid, fut)
   complete fut

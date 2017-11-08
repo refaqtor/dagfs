@@ -1,9 +1,9 @@
-import asyncdispatch, ipld, ipfsdaemon, os, strutils, multiformats, streams, cbor, unixfs, store
+import asyncdispatch, ipld, ipfsdaemon, os, strutils, multiformats, streams, cbor, unixfs, ipldstore
 
 when not declared(commandLineParams):
   {.error: "POSIX only utility".}
 
-proc addCmd(store: Store; params: seq[TaintedString]) =
+proc addCmd(store: IpldStore; params: seq[TaintedString]) =
   for path in params[1.. params.high]:
     let info = getFileInfo(path, followSymlink=false)
     case info.kind
@@ -15,7 +15,7 @@ proc addCmd(store: Store; params: seq[TaintedString]) =
       stdout.writeLine cid, " ", path
     else: continue
 
-proc mergeCmd(store: Store; params: seq[TaintedString]) =
+proc mergeCmd(store: IpldStore; params: seq[TaintedString]) =
   let
     root = newDag()
 
@@ -31,7 +31,7 @@ proc mergeCmd(store: Store; params: seq[TaintedString]) =
   let cid = waitFor store.putDag(root)
   stdout.writeLine cid
 
-proc infoCmd(store: Store; params: seq[TaintedString]) {.async.} =
+proc infoCmd(store: IpldStore; params: seq[TaintedString]) {.async.} =
   for cidStr in params[1..params.high]:
     let
       cid = parseCid cidStr
@@ -40,7 +40,7 @@ proc infoCmd(store: Store; params: seq[TaintedString]) {.async.} =
       let dag = await store.getDag(cid)
       stdout.writeLine dag
 
-proc catCmd(store: Store; params: seq[TaintedString]) {.async.} =
+proc catCmd(store: IpldStore; params: seq[TaintedString]) {.async.} =
   for param in params[1..params.high]:
     let
       cid = parseCid param
@@ -56,7 +56,7 @@ proc printUnixFs(node: UnixFsNode) =
     stdout.writeLine name
 
 #[
-proc lsCmd(store: Store; params: seq[TaintedString]) {.async.} =
+proc lsCmd(store: IpldStore; params: seq[TaintedString]) {.async.} =
   for param in params[1..params.high]:
     echo param
 
