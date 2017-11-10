@@ -56,7 +56,6 @@ proc toCbor*(node: UnixFsNode): CborNode =
     if node.size != 0:
       result[sizeKey.int] = newCborInt node.size
 
-#[
 proc fromCbor*(result: var UnixFsNode; cn: CborNode)=
   doAssert(cn.kind == cborMap)
   result = newUnixFsRoot()
@@ -73,7 +72,6 @@ proc fromCbor*(result: var UnixFsNode; cn: CborNode)=
       result.addFile(name, cid, size)
     else:
       discard
-]#
 
 proc toStream*(dir: UnixFsNode; s: Stream) =
   doAssert(dir.kind == rootNode)
@@ -84,3 +82,14 @@ iterator walk*(node: UnixFsNode): string =
   if node.kind == rootNode:
     for k in node.entries.keys:
       yield k
+
+proc containsFile*(dir: UnixFsNode; name: string): bool =
+  doAssert(dir.kind == rootNode)
+  dir.entries.contains name
+
+proc lookupFile*(dir: UnixFsNode; name: string): tuple[cid: Cid, size: BiggestInt] =
+  doAssert(dir.kind == rootNode)
+  let f = dir.entries[name]
+  if f.kind == fileNode:
+    result.cid = f.fCid
+    result.size = f.size

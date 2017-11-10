@@ -35,6 +35,7 @@ proc infoCmd(store: IpldStore; params: seq[TaintedString]) {.async.} =
   for cidStr in params[1..params.high]:
     let
       cid = parseCid cidStr
+    stdout.writeLine cid
     stdout.writeLine cid.toHex
     if cid.isDagCbor:
       let dag = await store.getDag(cid)

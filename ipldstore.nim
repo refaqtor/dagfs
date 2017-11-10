@@ -16,23 +16,41 @@ proc close*(s: IpldStore) =
 
 proc putRaw*(s: IpldStore; blk: string): Future[Cid] {.async.} =
   ## Place a raw block to the store.
+  doAssert(not s.putRawImpl.isNil)
   result = await s.putRawImpl(s, blk)
 
 proc getRaw*(s: IpldStore; cid: Cid): Future[string] {.async.} =
   ## Retrieve a raw block from the store.
+  doAssert(not s.getRawImpl.isNil)
   result = await s.getRawImpl(s, cid)
 
 proc putDag*(s: IpldStore; dag: Dag): Future[Cid] {.async.} =
   ## Place an IPLD node in the store.
+  doAssert(not s.putDagImpl.isNil)
   result = await s.putDagImpl(s, dag)
 
 proc getDag*(s: IpldStore; cid: Cid): Future[Dag] {.async.} =
   ## Retrieve an IPLD node from the store.
+  doAssert(not s.getDagImpl.isNil)
   result = await s.getDagImpl(s, cid)
 
 proc fileStream*(s: IpldStore; cid: Cid; fut: FutureStream[string]): Future[void] {.async.} =
   ## Asynchronously stream a file from a CID list.
-  await s.fileStreamImpl(s, cid, fut)
+  if not s.fileStreamImpl.isNil:
+    # use an optimized implementation
+    await s.fileStreamImpl(s, cid, fut)
+  else:
+    # use the simple implementation
+    if cid.isRaw:
+      let blk = await s.getRaw(cid)
+      await fut.write(blk)
+    elif cid.isDagCbor:
+      let dag = await s.getDag(cid)
+      for link in dag["links"].items:
+        let subCid = link["cid"].getBytes.parseCid
+        await fileStream(s, subCid, fut)
+    else:
+      discard
 
 proc addFile*(store: IpldStore; path: string): (Cid, int) =
   ## Add a file to the store and return the CID and file size.
@@ -79,7 +97,8 @@ type
     root: string
 
 proc parentAndFile(fs: FileStore; cid: Cid): (string, string) =
-  let h = cid.toHex
+  let
+    h = cid.toHex
   result[0]  = fs.root / h[0..10]
   result[1]  = result[0]  / h[11..h.high]
 

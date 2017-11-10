@@ -1,4 +1,4 @@
-import nimSHA2, streams, multiformats, base58.bitcoin, cbor, hex
+import nimSHA2, streams, multiformats, base58.bitcoin, cbor, hex, hashes
 
 type Cid* = object
   digest*: string
@@ -13,6 +13,11 @@ proc `==`*(x, y: Cid): bool =
     x.codec == y.codec and
     x.hash == y.hash and
     x.digest == y.digest
+
+proc hash*(cid: Cid): Hash =
+  result = hash cid.digest
+  result = result !& cid.ver !& cid.codec.int !& cid.hash.int
+  result = !$result
 
 proc isRaw*(cid: Cid): bool =
   cid.codec == MulticodecTag.Raw
@@ -126,19 +131,6 @@ proc merge*(dag, other: Dag) =
         result.add link
           # append
 
-proc containsFile*(dag: Dag; name: string): bool =
-  for link in dag["links"].items:
-    if link["name"].getText == name:
-      return true
-  false
-
-proc lookupFile*(dag: Dag; name: string): tuple[cid: Cid, size: int] =
-  for link in dag["links"].items:
-    if link["name"].getText == name:
-      result.cid = parseCid link["cid"].getBytes()
-      result.size = link["size"].getInt().int
-      return
-  raise newException(SystemError, "DAG file lookup failed")
 
 #[
 proc unixFsContains*(dag: Dag; name: string): bool =
