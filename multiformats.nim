@@ -18,6 +18,7 @@ type MultibaseTag* = enum
   Base58btc    = 'z', # highest letter
 
 type MulticodecTag* {.pure.} = enum
+  Invalid = 0x00,
   Base1 = 0x01,
   Ip4 = 0x04,
   Tcp = 0x06,

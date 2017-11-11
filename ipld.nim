@@ -7,6 +7,10 @@ type Cid* = object
   ver*: int
   logicalLen*: int # not included in canonical representation
 
+proc initCid*(): Cid =
+  ## Initialize an invalid CID.
+  Cid(hash: MulticodecTag.Invalid, codec: MulticodecTag.Invalid)
+
 proc `==`*(x, y: Cid): bool =
   result =
     x.ver == y.ver and

@@ -57,20 +57,17 @@ proc addFile*(store: IpldStore; path: string): (Cid, int) =
   let
     fStream = newFileStream(path, fmRead)
     fRoot = newDag()
-  var
-    fSize = 0
-    lastCid: Cid
+  result = (initCid(), 0)
   for cid, chunk in fStream.simpleChunks:
     discard waitFor store.putRaw(chunk)
     fRoot.add(cid, "", chunk.len)
-    lastCid = cid
-    fSize.inc chunk.len
+    result[0] = cid
+    result[1].inc chunk.len
   if fRoot["links"].len == 1:
     # take a shortcut and return the bare chunk CID
-    result[0] = lastCid
+    discard
   else:
     result[0] = waitFor store.putDag(fRoot)
-  result[1] = fSize
 
 proc addDir*(store: IpldStore; dirPath: string): Cid =
   var dRoot = newUnixFsRoot()
@@ -96,7 +93,23 @@ type
   FileStoreObj = object of IpldStoreObj
     root: string
 
-proc parentAndFile(fs: FileStore; cid: Cid): (string, string) =
+proc path(fs: FileStore; cid: Cid): string =
+  ## Generate the file path of a CID within the store.
+  let digest = hex.encode(cid.digest)
+  var hashType: string
+  case cid.hash
+  of MulticodecTag.Sha2_256:
+    hashType = "sha256"
+  of MulticodecTag.Blake2b_512:
+    hashType = "blake2b"
+  of MulticodecTag.Blake2s_256:
+    hashType = "blake2s"
+  else:
+    raise newException(SystemError, "unhandled hash type")
+  result = fs.root / hashType / digest[0..1] / digest[2..digest.high]
+
+proc parentAndFile(fs: FileStore; cid: Cid): (string, string) {.deprecated.} =
+  ## Generate the parent path and file path of CID within the store.
   let digest = hex.encode(cid.digest)
   var hashType: string
   case cid.hash
@@ -191,3 +204,69 @@ proc newFileStore*(root: string): FileStore =
   result.getDagImpl = fsGetDag
   result.fileStreamImpl = fsFileStream
   result.root = root
+
+when isMainModule:
+  # The 'ipldstore' utility:
+  import os
+
+  when not declared(commandLineParams):
+    {.error: "'ipldstore' is a POSIX only utility".}
+
+  const
+    # Argument order inspired the cruel travesty that is every systemd utility
+    StoreParamIndex = 0
+    CmdParamIndex = 1
+    ArgParamIndex = 2
+
+  proc panic(msg: varargs[string]) =
+    stderr.writeLine(msg)
+    quit QuitFailure
+
+  proc addCmd(store: FileStore; params: seq[TaintedString]) {.async.} =
+    for path in params[ArgParamIndex.. params.high]:
+      let info = getFileInfo(path, followSymlink=false)
+      case info.kind
+      of pcFile:
+        let (cid, size) = store.addFile path
+        stdout.writeLine cid, " ", size, " ", path
+      of pcDir:
+        let cid = store.addDir path
+        stdout.writeLine cid, " ", path
+      else: continue
+
+  proc catCmd(store: FileStore; params: seq[TaintedString]) {.async.} =
+    for param in params[ArgParamIndex..params.high]:
+      let
+        cid = parseCid param
+        fut = newFutureStream[string]()
+      asyncCheck store.fileStream(cid, fut)
+      while true:
+        let (valid, chunk) = await fut.read()
+        if not valid: break
+        stdout.write chunk
+
+  proc dumpCmd(store: FileStore; params: seq[TaintedString]) {.async.} =
+    for param in params[ArgParamIndex..params.high]:
+      let
+        cid = parseCid param
+        path = store.path cid
+      stdout.writeLine path
+
+  proc main() =
+    let params = commandLineParams()
+    if params.len < 3:
+      panic "usage: ipldstore STORE_PATH COMMAND [ARGS, ...]"
+    let
+      store = newFileStore(params[StoreParamIndex])
+      cmdStr = params[CmdParamIndex]
+    case cmdStr
+    of "add":
+      waitFor addCmd(store, params)
+    of "cat":
+      waitFor catCmd(store, params)
+    of "dump":
+      waitFor dumpCmd(store, params)
+    else:
+      panic "unhandled command '", cmdStr, "'"
+
+  main()

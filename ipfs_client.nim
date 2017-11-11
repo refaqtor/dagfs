@@ -89,8 +89,8 @@ proc main() =
   of "cat":
     waitFor catCmd(store, params)
   of "ls":
-    echo "fuck that shit"
     #waitFor lsCmd(store, params)
+    discard
 
   close store
   quit()
