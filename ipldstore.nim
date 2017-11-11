@@ -1,4 +1,4 @@
-import asyncdispatch, asyncfile, streams, strutils, os, ipld, cbor, multiformats, unixfs
+import asyncdispatch, asyncfile, streams, strutils, os, ipld, cbor, multiformats, unixfs, hex
 
 type
   IpldStore* = ref IpldStoreObj
@@ -97,10 +97,19 @@ type
     root: string
 
 proc parentAndFile(fs: FileStore; cid: Cid): (string, string) =
-  let
-    h = cid.toHex
-  result[0]  = fs.root / h[0..10]
-  result[1]  = result[0]  / h[11..h.high]
+  let digest = hex.encode(cid.digest)
+  var hashType: string
+  case cid.hash
+  of MulticodecTag.Sha2_256:
+    hashType = "sha256"
+  of MulticodecTag.Blake2b_512:
+    hashType = "blake2b"
+  of MulticodecTag.Blake2s_256:
+    hashType = "blake2s"
+  else:
+    raise newException(SystemError, "unhandled hash type")
+  result[0]  = fs.root / hashType / digest[0..1]
+  result[1]  = result[0]  / digest[2..digest.high]
 
 proc putToFile(fs: FileStore; cid: Cid; blk: string) {.async.} =
   let (dir, path) = fs.parentAndFile cid
