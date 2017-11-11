@@ -23,7 +23,7 @@ type
       dCid*: Cid
     of fileNode:
       fCid*: Cid
-      size: BiggestInt
+      fSize*: BiggestInt
 
 proc newUnixFsRoot*(): UnixFsNode =
   UnixFsNode(kind: rootNode, entries: initOrderedTable[string, UnixFsNode](8))
@@ -34,7 +34,7 @@ proc addDir*(dir: var UnixFsNode; name: string; cid: Cid) =
 
 proc addFile*(dir: var UnixFsNode; name: string; cid: Cid; size: BiggestInt) =
   doAssert(dir.kind == rootNode)
-  dir.entries[name] = UnixFsNode(kind: fileNode, fCid: cid, size: size)
+  dir.entries[name] = UnixFsNode(kind: fileNode, fCid: cid, fSize: size)
 
 proc del*(dir: var UnixFsNode; name: string) =
   doAssert(dir.kind == rootNode)
@@ -53,8 +53,8 @@ proc toCbor*(node: UnixFsNode): CborNode =
   of fileNode:
     result[typeKey.int] = newCborInt ufsFile.int
     result[contentKey.int] = node.fCid.toCbor
-    if node.size != 0:
-      result[sizeKey.int] = newCborInt node.size
+    if node.fSize != 0:
+      result[sizeKey.int] = newCborInt node.fSize
 
 proc parseUnixfs*(c: CborNode): UnixFsNode =
   doAssert(c.kind == cborMap)
@@ -92,4 +92,4 @@ proc lookupFile*(dir: UnixFsNode; name: string): tuple[cid: Cid, size: BiggestIn
   let f = dir.entries[name]
   if f.kind == fileNode:
     result.cid = f.fCid
-    result.size = f.size
+    result.size = f.fSize

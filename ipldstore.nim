@@ -223,16 +223,21 @@ when isMainModule:
     quit QuitFailure
 
   proc addCmd(store: FileStore; params: seq[TaintedString]) =
+    var root = newUnixFsRoot()
     for path in params[ArgParamIndex.. params.high]:
-      let info = getFileInfo(path, followSymlink=false)
+      let
+        info = getFileInfo(path)
+        name = path[path.rfind('/')+1..path.high]
       case info.kind
-      of pcFile:
-        let (cid, size) = waitFor store.addFile path
-        stdout.writeLine cid, " ", size, " ", path
-      of pcDir:
-        let cid = store.addDir path
-        stdout.writeLine cid, " ", path
-      else: continue
+      of pcFile, pcLinkToFile:
+        let
+          (fCid, fSize) = waitFor store.addFile path
+        root.addFile(name, fCid, fSize)
+      of pcDir, pcLinkToDir:
+        let cid = store.addDir(path)
+        root.addDir(name, cid)
+    let cid = waitFor store.putDag(root.toCbor)
+    stdout.writeLine cid
 
   proc catCmd(store: FileStore; params: seq[TaintedString]) =
     for param in params[ArgParamIndex..params.high]:
@@ -271,10 +276,63 @@ when isMainModule:
     for param in params[ArgParamIndex..params.high]:
       dumpPaths(store, param.parseCid)
 
+  proc mergeCmd(store: FileStore; params: seq[TaintedString]) =
+    var root = newUnixFsRoot()
+    for param in params[ArgParamIndex..params.high]:
+      let cid = parseCid param
+      if cid.codec != MulticodecTag.Dag_cbor:
+        panic param, " is not CBOR encoded"
+      let
+        dag = waitFor store.getDag(cid)
+      try:
+        let dir = parseUnixfs dag
+        for name, node in dir.walk:
+          case node.kind
+          of dirNode:
+            root.addDir(name, node.dCid)
+          of fileNode:
+            root.addFile(name, node.fCid, node.fSize)
+          else:
+            doAssert(false)
+      except:
+        panic "cannot merge ", $cid
+    let cid = waitFor store.putDag(root.toCbor)
+    stdout.writeLine cid
+
+  proc ls(store: FileStore; cid: Cid, depth: int) =
+    if cid.isDagCbor:
+      let dag = waitFor store.getDag(cid)
+      block:
+        let ufsNode = parseUnixfs dag
+        if ufsNode.kind == rootNode:
+          for name, u in ufsNode.walk:
+            for _ in 0..depth: stdout.write('\t')
+            case u.kind:
+              of fileNode:
+                stdout.writeLine(u.fcid, " ", name, "\t", u.fSize)
+              of dirNode:
+                stdout.writeLine(u.dCid, " ", name)
+                ls(store, u.dCid, depth+1)
+              else:
+                doAssert(false)
+
+  proc lsCmd(store: FileStore; params: seq[TaintedString]) =
+    for param in params[ArgParamIndex..params.high]:
+      let cid = param.parseCid
+      stdout.writeLine(cid)
+      ls(store, cid, 0)
+
   proc main() =
     let params = commandLineParams()
     if params.len < 3:
-      panic "usage: ipldstore STORE_PATH COMMAND [ARGS, ...]"
+      panic "  usage: ipldstore STORE_PATH COMMAND [ARGS, ...]\n" &
+        "    commands:\n"&
+        "       add: create a root directory containing the supplied paths as top-level nodes\n"&
+        "       cat: concatenate a CID, must be a file\n"&
+        "      dump: print the store paths that compose a CID\n"&
+        "     merge: merge roots\n"&
+        "        ls: recursively list a root\n"&
+        ""
     let
       store = newFileStore(params[StoreParamIndex])
       cmdStr = params[CmdParamIndex]
@@ -285,6 +343,10 @@ when isMainModule:
       catCmd(store, params)
     of "dump":
       dumpCmd(store, params)
+    of "merge":
+      mergeCmd(store, params)
+    of "ls":
+      lsCmd(store, params)
     else:
       panic "unhandled command '", cmdStr, "'"
 
