@@ -52,7 +52,7 @@ proc fileStream*(s: IpldStore; cid: Cid; fut: FutureStream[string]): Future[void
     else:
       discard
 
-proc addFile*(store: IpldStore; path: string): (Cid, int) =
+proc addFile*(store: IpldStore; path: string): Future[(Cid, int)] {.async.} =
   ## Add a file to the store and return the CID and file size.
   let
     fStream = newFileStream(path, fmRead)
@@ -75,7 +75,7 @@ proc addDir*(store: IpldStore; dirPath: string): Cid =
     case kind
     of pcFile:
       let
-        (fCid, fSize) = store.addFile(path)
+        (fCid, fSize) = waitFor store.addFile(path)
         fName = path[path.rfind('/')+1..path.high]
       dRoot.addFile(fName, fCid, fSize)
     of pcDir:
@@ -207,7 +207,7 @@ proc newFileStore*(root: string): FileStore =
 
 when isMainModule:
   # The 'ipldstore' utility:
-  import os
+  import os, unixfs
 
   when not declared(commandLineParams):
     {.error: "'ipldstore' is a POSIX only utility".}
@@ -222,35 +222,54 @@ when isMainModule:
     stderr.writeLine(msg)
     quit QuitFailure
 
-  proc addCmd(store: FileStore; params: seq[TaintedString]) {.async.} =
+  proc addCmd(store: FileStore; params: seq[TaintedString]) =
     for path in params[ArgParamIndex.. params.high]:
       let info = getFileInfo(path, followSymlink=false)
       case info.kind
       of pcFile:
-        let (cid, size) = store.addFile path
+        let (cid, size) = waitFor store.addFile path
         stdout.writeLine cid, " ", size, " ", path
       of pcDir:
         let cid = store.addDir path
         stdout.writeLine cid, " ", path
       else: continue
 
-  proc catCmd(store: FileStore; params: seq[TaintedString]) {.async.} =
+  proc catCmd(store: FileStore; params: seq[TaintedString]) =
     for param in params[ArgParamIndex..params.high]:
       let
         cid = parseCid param
         fut = newFutureStream[string]()
       asyncCheck store.fileStream(cid, fut)
       while true:
-        let (valid, chunk) = await fut.read()
+        let (valid, chunk) = waitFor fut.read()
         if not valid: break
         stdout.write chunk
 
-  proc dumpCmd(store: FileStore; params: seq[TaintedString]) {.async.} =
+  proc dumpPaths(store: FileStore; cid: Cid) =
+    stdout.writeLine store.path(cid)
+    if cid.isDagCbor:
+      let dag = waitFor store.getDag(cid)
+      block:
+        let ufsNode = parseUnixfs dag
+        case ufsNode.kind
+        of fileNode:
+          for link in dag["links"].items:
+            dumpPaths(store, link["cid"].getBytes.parseCid)
+        of rootNode:
+          for _, u in ufsNode.walk:
+            case u.kind:
+              of fileNode:
+                dumpPaths(store, u.fCid)
+              of dirNode:
+                dumpPaths(store, u.dCid)
+              else:
+                doAssert(false)
+        of dirNode:
+          doAssert(false)
+
+  proc dumpCmd(store: FileStore; params: seq[TaintedString]) =
     for param in params[ArgParamIndex..params.high]:
-      let
-        cid = parseCid param
-        path = store.path cid
-      stdout.writeLine path
+      dumpPaths(store, param.parseCid)
 
   proc main() =
     let params = commandLineParams()
@@ -261,11 +280,11 @@ when isMainModule:
       cmdStr = params[CmdParamIndex]
     case cmdStr
     of "add":
-      waitFor addCmd(store, params)
+      addCmd(store, params)
     of "cat":
-      waitFor catCmd(store, params)
+      catCmd(store, params)
     of "dump":
-      waitFor dumpCmd(store, params)
+      dumpCmd(store, params)
     else:
       panic "unhandled command '", cmdStr, "'"
 

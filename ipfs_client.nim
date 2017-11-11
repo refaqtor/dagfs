@@ -8,7 +8,7 @@ proc addCmd(store: IpldStore; params: seq[TaintedString]) =
     let info = getFileInfo(path, followSymlink=false)
     case info.kind
     of pcFile:
-      let (cid, size) = store.addFile path
+      let (cid, size) = waitFor store.addFile path
       stdout.writeLine cid, " ", size, " ", path
     of pcDir:
       let cid = store.addDir path

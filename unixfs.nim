@@ -16,13 +16,13 @@ type UnixFsKind* = enum
 
 type
   UnixFsNode* = object
-    case kind: UnixFsKind
+    case kind*: UnixFsKind
     of rootNode:
       entries: OrderedTable[string, UnixFsNode]
     of dirNode:
-      dCid: Cid
+      dCid*: Cid
     of fileNode:
-      fCid: Cid
+      fCid*: Cid
       size: BiggestInt
 
 proc newUnixFsRoot*(): UnixFsNode =
@@ -56,10 +56,10 @@ proc toCbor*(node: UnixFsNode): CborNode =
     if node.size != 0:
       result[sizeKey.int] = newCborInt node.size
 
-proc fromCbor*(result: var UnixFsNode; cn: CborNode)=
-  doAssert(cn.kind == cborMap)
+proc parseUnixfs*(c: CborNode): UnixFsNode =
+  doAssert(c.kind == cborMap)
   result = newUnixFsRoot()
-  for k, v in cn.map.pairs:
+  for k, v in c.map.pairs:
     let
       name = k.getString
       t = v[typeKey.int].getInt.UnixFsType
@@ -78,10 +78,10 @@ proc toStream*(dir: UnixFsNode; s: Stream) =
   let c = dir.toCbor()
   c.toStream s
 
-iterator walk*(node: UnixFsNode): string =
+iterator walk*(node: UnixFsNode): (string, UnixFsNode) =
   if node.kind == rootNode:
-    for k in node.entries.keys:
-      yield k
+    for k, v in node.entries.pairs:
+      yield (k, v)
 
 proc containsFile*(dir: UnixFsNode; name: string): bool =
   doAssert(dir.kind == rootNode)
