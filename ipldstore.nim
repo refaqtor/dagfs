@@ -1,6 +1,7 @@
 import asyncdispatch, asyncfile, streams, strutils, os, ipld, cbor, multiformats, unixfs, hex
 
 type
+  MissingObject* = object of SystemError
   IpldStore* = ref IpldStoreObj
   IpldStoreObj* = object of RootObj
     closeImpl*: proc (s: IpldStore) {.nimcall, gcsafe.}
@@ -23,6 +24,8 @@ proc getRaw*(s: IpldStore; cid: Cid): Future[string] {.async.} =
   ## Retrieve a raw block from the store.
   doAssert(not s.getRawImpl.isNil)
   result = await s.getRawImpl(s, cid)
+  if result.isNil:
+    raise newException(MissingObject, $cid)
 
 proc putDag*(s: IpldStore; dag: Dag): Future[Cid] {.async.} =
   ## Place an IPLD node in the store.
@@ -33,6 +36,8 @@ proc getDag*(s: IpldStore; cid: Cid): Future[Dag] {.async.} =
   ## Retrieve an IPLD node from the store.
   doAssert(not s.getDagImpl.isNil)
   result = await s.getDagImpl(s, cid)
+  if result.isNil:
+    raise newException(MissingObject, $cid)
 
 proc fileStream*(s: IpldStore; cid: Cid; fut: FutureStream[string]): Future[void] {.async.} =
   ## Asynchronously stream a file from a CID list.
@@ -63,11 +68,16 @@ proc addFile*(store: IpldStore; path: string): Future[(Cid, int)] {.async.} =
     fRoot.add(cid, "", chunk.len)
     result[0] = cid
     result[1].inc chunk.len
-  if fRoot["links"].len == 1:
-    # take a shortcut and return the bare chunk CID
-    discard
+  if result[1] == 0:
+    # return the CID for a raw nothing
+    result[0] = CidSha256("")
   else:
-    result[0] = waitFor store.putDag(fRoot)
+    if fRoot["links"].len == 1:
+      # take a shortcut and return the bare chunk CID
+      discard
+    else:
+      result[0] = waitFor store.putDag(fRoot)
+    close fStream
 
 proc addDir*(store: IpldStore; dirPath: string): Cid =
   var dRoot = newUnixFsRoot()
@@ -106,7 +116,7 @@ proc path(fs: FileStore; cid: Cid): string =
     hashType = "blake2s"
   else:
     raise newException(SystemError, "unhandled hash type")
-  result = fs.root / hashType / digest[0..1] / digest[2..digest.high]
+  result = hashType / digest[0..1] / digest[2..digest.high]
 
 proc parentAndFile(fs: FileStore; cid: Cid): (string, string) {.deprecated.} =
   ## Generate the parent path and file path of CID within the store.
@@ -222,9 +232,24 @@ when isMainModule:
     stderr.writeLine(msg)
     quit QuitFailure
 
-  proc addCmd(store: FileStore; params: seq[TaintedString]) =
+  iterator params(cmdLine: seq[TaintedString]): string =
+    if cmdLine.len == ArgParamIndex+1 and cmdLine[ArgParamIndex] == "-":
+      # Dump and split stdin
+      let words = stdin.readAll.splitWhitespace
+      var i = 0
+      while i < words.len:
+        yield words[i]
+        inc i
+    else:
+      # feed the parameters as usual
+      var i = ArgParamIndex
+      while i < cmdLine.len:
+        yield cmdLine[i]
+        inc i
+
+  proc addCmd(store: FileStore; cmdLine: seq[TaintedString]) =
     var root = newUnixFsRoot()
-    for path in params[ArgParamIndex.. params.high]:
+    for path in cmdLine.params:
       let
         info = getFileInfo(path)
         name = path[path.rfind('/')+1..path.high]
@@ -239,8 +264,8 @@ when isMainModule:
     let cid = waitFor store.putDag(root.toCbor)
     stdout.writeLine cid
 
-  proc catCmd(store: FileStore; params: seq[TaintedString]) =
-    for param in params[ArgParamIndex..params.high]:
+  proc catCmd(store: FileStore; cmdLine: seq[TaintedString]) =
+    for param in cmdLine.params:
       let
         cid = parseCid param
         fut = newFutureStream[string]()
@@ -272,13 +297,18 @@ when isMainModule:
         of dirNode:
           doAssert(false)
 
-  proc dumpCmd(store: FileStore; params: seq[TaintedString]) =
-    for param in params[ArgParamIndex..params.high]:
-      dumpPaths(store, param.parseCid)
+  proc dumpCmd(store: FileStore; cmdLine: seq[TaintedString]) =
+    for param in cmdLine.params:
+      var cid = initCid()
+      try:
+        cid = param.parseCid
+      except:
+        stderr.writeLine "invalid CID '", param, "'"
+      dumpPaths(store, cid)
 
-  proc mergeCmd(store: FileStore; params: seq[TaintedString]) =
+  proc mergeCmd(store: FileStore; cmdLine: seq[TaintedString]) =
     var root = newUnixFsRoot()
-    for param in params[ArgParamIndex..params.high]:
+    for param in cmdLine.params:
       let cid = parseCid param
       if cid.codec != MulticodecTag.Dag_cbor:
         panic param, " is not CBOR encoded"
@@ -316,15 +346,15 @@ when isMainModule:
               else:
                 doAssert(false)
 
-  proc lsCmd(store: FileStore; params: seq[TaintedString]) =
-    for param in params[ArgParamIndex..params.high]:
+  proc lsCmd(store: FileStore; cmdLine: seq[TaintedString]) =
+    for param in cmdLine.params:
       let cid = param.parseCid
       stdout.writeLine(cid)
       ls(store, cid, 0)
 
   proc main() =
-    let params = commandLineParams()
-    if params.len < 3:
+    let cmdLine = commandLineParams()
+    if cmdLine.len < 3:
       panic "  usage: ipldstore STORE_PATH COMMAND [ARGS, ...]\n" &
         "    commands:\n"&
         "       add: create a root directory containing the supplied paths as top-level nodes\n"&
@@ -334,19 +364,19 @@ when isMainModule:
         "        ls: recursively list a root\n"&
         ""
     let
-      store = newFileStore(params[StoreParamIndex])
-      cmdStr = params[CmdParamIndex]
+      store = newFileStore(cmdLine[StoreParamIndex])
+      cmdStr = cmdLine[CmdParamIndex]
     case cmdStr
     of "add":
-      addCmd(store, params)
+      addCmd(store, cmdLine)
     of "cat":
-      catCmd(store, params)
+      catCmd(store, cmdLine)
     of "dump":
-      dumpCmd(store, params)
+      dumpCmd(store, cmdLine)
     of "merge":
-      mergeCmd(store, params)
+      mergeCmd(store, cmdLine)
     of "ls":
-      lsCmd(store, params)
+      lsCmd(store, cmdLine)
     else:
       panic "unhandled command '", cmdStr, "'"
 
