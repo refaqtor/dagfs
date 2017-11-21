@@ -54,6 +54,8 @@ proc toBase58*(cid: Cid): string =
 proc `$`*(cid: Cid): string = cid.toBase58
 
 proc parseCid*(s: string): Cid =
+  if s.len < (1+1+1+1):
+    raise newException(ValueError, "too short to be a valid CID")
   var
     raw: string
     off: int
@@ -65,6 +67,8 @@ proc parseCid*(s: string): Cid =
     off = 1
   of MultibaseTag.Base16, MultibaseTag.InconsistentBase16:
     raw = hex.decode(s[1..s.high])
+    if raw.isNil:
+      raise newException(ValueError, "not a CID")
   of MultibaseTag.Base58btc:
     raw = bitcoin.decode(s[1..s.high])
   else:
@@ -108,6 +112,16 @@ proc add*(dag: Dag; cid: Cid; name: string; size: int) =
   let link = newCborMap()
   link["cid"] = newCborBytes(cid.toRaw)
   link["name"] = newCborText(name)
+  link["size"] = newCborInt(size)
+  var links = dag["links"]
+  if links.isNil:
+    links = newCborArray()
+    dag["links"] = links
+  links.add link
+
+proc add*(dag: Dag; cid: Cid; size: int) =
+  let link = newCborMap()
+  link["cid"] = newCborBytes(cid.toRaw)
   link["size"] = newCborInt(size)
   var links = dag["links"]
   if links.isNil:

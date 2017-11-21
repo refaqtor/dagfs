@@ -1,4 +1,4 @@
-import asyncdispatch, asyncfile, streams, strutils, os, ipld, cbor, multiformats, unixfs, hex
+import asyncdispatch, asyncfile, streams, strutils, os, ipld, cbor, multiformats, hex, ropes
 
 type
   MissingObject* = object of SystemError
@@ -56,46 +56,6 @@ proc fileStream*(s: IpldStore; cid: Cid; fut: FutureStream[string]): Future[void
         await fileStream(s, subCid, fut)
     else:
       discard
-
-proc addFile*(store: IpldStore; path: string): Future[(Cid, int)] {.async.} =
-  ## Add a file to the store and return the CID and file size.
-  let
-    fStream = newFileStream(path, fmRead)
-    fRoot = newDag()
-  result = (initCid(), 0)
-  for cid, chunk in fStream.simpleChunks:
-    discard waitFor store.putRaw(chunk)
-    fRoot.add(cid, "", chunk.len)
-    result[0] = cid
-    result[1].inc chunk.len
-  if result[1] == 0:
-    # return the CID for a raw nothing
-    result[0] = CidSha256("")
-  else:
-    if fRoot["links"].len == 1:
-      # take a shortcut and return the bare chunk CID
-      discard
-    else:
-      result[0] = waitFor store.putDag(fRoot)
-    close fStream
-
-proc addDir*(store: IpldStore; dirPath: string): Cid =
-  var dRoot = newUnixFsRoot()
-  for kind, path in walkDir dirPath:
-    case kind
-    of pcFile:
-      let
-        (fCid, fSize) = waitFor store.addFile(path)
-        fName = path[path.rfind('/')+1..path.high]
-      dRoot.addFile(fName, fCid, fSize)
-    of pcDir:
-      let
-        dCid = store.addDir(path)
-        dName = path[path.rfind('/')+1..path.high]
-      dRoot.addDir(dname, dCid)
-    else: continue
-  let c = dRoot.toCbor
-  result = waitFor store.putDag(c)
 
 type
   FileStore* = ref FileStoreObj
@@ -194,10 +154,14 @@ proc fsFileStreamRecurs(fs: FileStore; cid: Cid; fut: FutureStream[string]) {.as
       close file
   elif cid.isDagCbor:
     let dag = await fs.fsGetDag(cid)
-    for link in dag["links"].items:
+    doAssert(not dag.isNil)
+    doAssert(dag.contains("links"), $dag & " does not contain 'links'")
+    for link in dag.items:
       let cid = link["cid"].getBytes.parseCid
       await fs.fsFileStreamRecurs(cid, fut)
-  else: discard
+  else:
+    doAssert(false)
+    discard
 
 proc fsFileStream(s: IpldStore; cid: Cid; fut: FutureStream[string]) {.async.} =
   var fs = FileStore(s)
@@ -214,6 +178,36 @@ proc newFileStore*(root: string): FileStore =
   result.getDagImpl = fsGetDag
   result.fileStreamImpl = fsFileStream
   result.root = root
+
+import unixfs
+
+proc dumpPaths*(result: var seq[string]; store: FileStore; cid: Cid) =
+  ## Recursively dump the constituent chunk files of a CID to a string seq.
+  result.add store.path(cid)
+  if cid.isDagCbor:
+    let dag = waitFor store.getDag(cid)
+    if dag.kind == cborMap:
+      if dag.contains("links"):
+        for cbor in dag["links"].items:
+          if cbor.contains("cid"):
+            result.add store.path(cbor["cid"].getString.parseCid)
+      else:
+        let ufsNode = parseUnixfs dag
+        case ufsNode.kind
+        of fileNode:
+          for link in dag["links"].items:
+            result.dumpPaths(store, link["cid"].getBytes.parseCid)
+        of rootNode:
+          for _, u in ufsNode.walk:
+            result.dumpPaths(store, u.cid)
+        of dirNode:
+          doAssert(false)
+
+iterator dumpPaths*(store: FileStore; cid: Cid): string =
+  var collector = newSeq[string]()
+  collector.dumpPaths(store, cid)
+  for p in collector:
+    yield p
 
 when isMainModule:
   # The 'ipldstore' utility:
@@ -247,23 +241,6 @@ when isMainModule:
         yield cmdLine[i]
         inc i
 
-  proc addCmd(store: FileStore; cmdLine: seq[TaintedString]) =
-    var root = newUnixFsRoot()
-    for path in cmdLine.params:
-      let
-        info = getFileInfo(path)
-        name = path[path.rfind('/')+1..path.high]
-      case info.kind
-      of pcFile, pcLinkToFile:
-        let
-          (fCid, fSize) = waitFor store.addFile path
-        root.addFile(name, fCid, fSize)
-      of pcDir, pcLinkToDir:
-        let cid = store.addDir(path)
-        root.addDir(name, cid)
-    let cid = waitFor store.putDag(root.toCbor)
-    stdout.writeLine cid
-
   proc catCmd(store: FileStore; cmdLine: seq[TaintedString]) =
     for param in cmdLine.params:
       let
@@ -274,37 +251,6 @@ when isMainModule:
         let (valid, chunk) = waitFor fut.read()
         if not valid: break
         stdout.write chunk
-
-  proc dumpPaths(store: FileStore; cid: Cid) =
-    stdout.writeLine store.path(cid)
-    if cid.isDagCbor:
-      let dag = waitFor store.getDag(cid)
-      block:
-        let ufsNode = parseUnixfs dag
-        case ufsNode.kind
-        of fileNode:
-          for link in dag["links"].items:
-            dumpPaths(store, link["cid"].getBytes.parseCid)
-        of rootNode:
-          for _, u in ufsNode.walk:
-            case u.kind:
-              of fileNode:
-                dumpPaths(store, u.fCid)
-              of dirNode:
-                dumpPaths(store, u.dCid)
-              else:
-                doAssert(false)
-        of dirNode:
-          doAssert(false)
-
-  proc dumpCmd(store: FileStore; cmdLine: seq[TaintedString]) =
-    for param in cmdLine.params:
-      var cid = initCid()
-      try:
-        cid = param.parseCid
-      except:
-        stderr.writeLine "invalid CID '", param, "'"
-      dumpPaths(store, cid)
 
   proc mergeCmd(store: FileStore; cmdLine: seq[TaintedString]) =
     var root = newUnixFsRoot()
@@ -332,10 +278,13 @@ when isMainModule:
   proc ls(store: FileStore; cid: Cid, depth: int) =
     if cid.isDagCbor:
       let dag = waitFor store.getDag(cid)
+      doAssert(not dag.isNil)
       block:
         let ufsNode = parseUnixfs dag
         if ufsNode.kind == rootNode:
           for name, u in ufsNode.walk:
+            doAssert(not name.isNil)
+            doAssert(not u.isNil, name & " is nil")
             for _ in 0..depth: stdout.write('\t')
             case u.kind:
               of fileNode:
@@ -345,12 +294,32 @@ when isMainModule:
                 ls(store, u.dCid, depth+1)
               else:
                 doAssert(false)
+    else:
+      doAssert(false)
 
   proc lsCmd(store: FileStore; cmdLine: seq[TaintedString]) =
     for param in cmdLine.params:
       let cid = param.parseCid
       stdout.writeLine(cid)
       ls(store, cid, 0)
+
+  proc mkdirCmd(store: FileStore; cmdLine: seq[TaintedString]) =
+    if cmdLine.len != ArgParamIndex+2:
+      panic "  ipldstore STORE_PATH mkdir DIR_NAME DIR_CONTENT_CID"
+    let
+      dName = cmdLine[ArgParamIndex]
+      dCid = parseCid cmdLine[ArgParamIndex+1]
+      dag = waitFor store.getDag(dCid)
+    try:
+      let dir = parseUnixfs dag
+      if dir.kind == fileNode:
+        panic $dCid, " is not a directory"
+    except:
+      panic "failed to parse directory ", $dCid
+    var root = newUnixFsRoot()
+    root.addDir(dName, dCid)
+    let cid = waitFor store.putDag(root.toCbor)
+    stdout.writeLine cid
 
   proc main() =
     let cmdLine = commandLineParams()
@@ -362,6 +331,7 @@ when isMainModule:
         "      dump: print the store paths that compose a CID\n"&
         "     merge: merge roots\n"&
         "        ls: recursively list a root\n"&
+        "     mkdir: create a root containing a named directory for a given CID\n"&
         ""
     let
       store = newFileStore(cmdLine[StoreParamIndex])
@@ -377,6 +347,8 @@ when isMainModule:
       mergeCmd(store, cmdLine)
     of "ls":
       lsCmd(store, cmdLine)
+    of "mkdir":
+      mkdirCmd(store, cmdLine)
     else:
       panic "unhandled command '", cmdStr, "'"
 
