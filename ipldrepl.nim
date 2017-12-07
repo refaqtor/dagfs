@@ -5,9 +5,6 @@ import ipld, ipldstore, unixfs, multiformats
 type
   EvalError = object of SystemError
 
-template raiseArgError(msg = "invalid argument") =
-    raise newException(EvalError, msg)
-
 type
   Env = ref EnvObj
 
@@ -68,10 +65,11 @@ type
     bindings: Table[string, NodeObj]
     paths: Table[string, UnixfsNode]
     cids: Table[Cid, UnixfsNode]
-    pathCacheHit: int
-    pathCacheMiss: int
-    cidCacheHit: int
-    cidCacheMiss: int
+    when not defined(release):
+      pathCacheHit: int
+      pathCacheMiss: int
+      cidCacheHit: int
+      cidCacheMiss: int
 
 proc print(a: Atom; s: Stream)
 proc print(ast: Node; s: Stream)
@@ -166,9 +164,12 @@ proc getFile(env: Env; path: string): UnixFsNode =
     result = waitFor env.store.addFile(path)
     assert(not result.isNil)
     env.paths[path] = result
-    inc env.pathCacheMiss
+    when not defined(release):
+      inc env.pathCacheMiss
   else:
-    inc env.pathCacheHit
+    when not defined(release):
+      inc env.pathCacheHit
+    else: discard
 
 proc getDir(env: Env; path: string): UnixFsNode =
   result = env.paths.getOrDefault path
@@ -176,20 +177,27 @@ proc getDir(env: Env; path: string): UnixFsNode =
     result = waitFor env.store.addDir(path)
     assert(not result.isNil)
     env.paths[path] = result
-    inc env.pathCacheMiss
+    when not defined(release):
+      inc env.pathCacheMiss
   else:
-    inc env.pathCacheHit
+    when not defined(release):
+      inc env.pathCacheHit
+    else: discard
 
 proc getUnixfs(env: Env; cid: Cid): UnixFsNode =
+  assert cid.isValid
   result = env.cids.getOrDefault cid
   if result.isNil:
     let dag = waitFor env.store.getDag(cid)
     assert(not dag.isNil)
-    result = parseUnixfs dag
+    result = parseUnixfs(dag, cid)
     env.cids[cid] = result
-    inc env.cidCacheMiss
+    when not defined(release):
+      inc env.cidCacheMiss
   else:
-    inc env.cidCacheHit
+    when not defined(release):
+      inc env.cidCacheHit
+    else: discard
 
 type
   Tokens = seq[string]
@@ -218,14 +226,14 @@ proc print(a: Atom; s: Stream) =
   of atomCid:
     s.write $a.cid
   of atomFile:
-    s.write $a.file.fCid
+    s.write $a.file.cid
     s.write ':'
     s.write a.fName
     s.write ':'
     s.write $a.file.fSize
   of atomDir:
     s.write "\n"
-    s.write $a.dir.dCid
+    s.write $a.dir.cid
     s.write ':'
     s.write a.dName
   of atomString:
@@ -438,7 +446,6 @@ proc listFunc(env: Env; args: NodeObj): Node =
 proc lsFunc(env: Env; args: NodeObj): Node =
   result = newNodeList()
   for n in args.walk:
-    assert(n.kind == nodeAtom, "ls called on a non-atomic node")
     let a = n.atom
     if a.cid.isDagCbor:
         let ufsNode = env.getUnixfs a.cid
@@ -449,10 +456,8 @@ proc lsFunc(env: Env; args: NodeObj): Node =
             case u.kind:
             of fileNode:
               result.append Atom(kind: atomFile, fName: name, file: u).newNode
-            of dirNode:
+            of dirNode, rootNode:
               result.append Atom(kind: atomDir, dName: name, dir: u).newNode
-            else:
-              raiseAssert("unhandled file type")
     else:
       raiseAssert("ls over a raw IPLD block")
 
@@ -474,12 +479,29 @@ proc mergeFunc(env: Env; args: NodeObj): Node =
   cid.newAtom.newNode
 
 proc pathFunc(env: Env; arg: NodeObj): Node =
-  #if arg.kind != nodeAtom or arg.atom.kind != atomString:
-  #  raiseArgError "invalid type for path conversion"
   result = arg.atom.str.newAtomPath.newNode
 
 proc rootFunc(env: Env; args: NodeObj): Node =
-  doAssert(false, "need a string type to pass path elements")
+  var root = newUnixFsRoot()
+  let
+    name = args.atom.str
+    cid = args.next.atom.cid
+    ufs = env.getUnixfs cid
+  root.add(name, ufs)
+  let rootCid = waitFor env.store.putDag(root.toCbor)
+  rootCid.newAtom.newNode
+
+proc walkFunc(env: Env; args: NodeObj): Node =
+  assert args.atom.cid.isValid
+  let
+    rootCid = args.atom.cid
+    walkPath = args.next.atom.str
+    root = env.getUnixfs rootCid
+    final = waitFor env.store.walk(root, walkPath)
+  if final.isNil:
+    result = newNodeError("no walk to '$1'" % walkPath, args)
+  else:
+     result = final.cid.newAtom.newNode
 
 ##
 # Environment
@@ -508,7 +530,7 @@ proc newEnv(storePath: string): Env =
   result.bindEnv "merge", mergeFunc
   result.bindEnv "path", pathFunc
   result.bindEnv "root", rootFunc
-
+  result.bindEnv "walk", walkFunc
 proc eval(ast: Node; env: Env): Node
 
 proc eval_ast(ast: Node; env: Env): Node =
@@ -578,8 +600,9 @@ proc main() =
     line = newStringOfCap 128
   while true:
     if not stdin.readLine line:
-      stderr.writeLine "Path cache miss/hit ", env.pathCacheMiss, "/", env.pathCacheHit
-      stderr.writeLine " CID cache miss/hit ", env.cidCacheMiss, "/", env.cidCacheHit
+      when not defined(release):
+        stderr.writeLine "Path cache miss/hit ", env.pathCacheMiss, "/", env.pathCacheHit
+        stderr.writeLine " CID cache miss/hit ", env.cidCacheMiss, "/", env.cidCacheHit
       quit()
     if line.len > 0:
       let ast = reader.read(line)

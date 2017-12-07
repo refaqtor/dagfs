@@ -45,3 +45,11 @@ Members of the root are not merged recursively.
 #### `(path <string>)`
 
 Convert a string to a path, if the path is valid and present.
+
+#### `(root <string> <cid>)`
+
+Create a new root contaning the giving CID at the given name.
+
+#### `(walk <cid> <string>)`
+
+Walk a path down one CID to another.

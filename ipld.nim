@@ -11,6 +11,9 @@ proc initCid*(): Cid =
   ## Initialize an invalid CID.
   Cid(hash: MulticodecTag.Invalid, codec: MulticodecTag.Invalid)
 
+proc isValid*(x: Cid): bool =
+  x.hash != MulticodecTag.Invalid
+
 proc `==`*(x, y: Cid): bool =
   result =
     x.ver == y.ver and
@@ -54,7 +57,7 @@ proc toBase58*(cid: Cid): string =
 proc `$`*(cid: Cid): string = cid.toBase58
 
 proc parseCid*(s: string): Cid =
-  if s.len < (1+1+1+1):
+  if unlikely(s.len < (1+1+1+1)):
     raise newException(ValueError, "too short to be a valid CID")
   var
     raw: string
@@ -67,7 +70,7 @@ proc parseCid*(s: string): Cid =
     off = 1
   of MultibaseTag.Base16, MultibaseTag.InconsistentBase16:
     raw = hex.decode(s[1..s.high])
-    if raw.isNil:
+    if unlikely(raw.isNil):
       raise newException(ValueError, "not a CID")
   of MultibaseTag.Base58btc:
     raw = bitcoin.decode(s[1..s.high])
@@ -77,7 +80,7 @@ proc parseCid*(s: string): Cid =
   off.inc parseUvarint(raw, codec, off)
   off.inc parseUvarint(raw, hash, off)
   off.inc parseUvarint(raw, digestLen, off)
-  if off + digestLen != raw.len:
+  if unlikely(off + digestLen != raw.len):
     raise newException(ValueError, "invalid multihash length")
   result.digest = raw[off..raw.high]
   result.hash = hash.MulticodecTag
