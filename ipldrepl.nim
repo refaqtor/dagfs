@@ -571,6 +571,9 @@ proc eval(ast: Node; env: Env): Node =
     newNodeError(getCurrentExceptionMsg(), ast[])
   except FieldError:
     newNodeError("invalid argument", ast[])
+  except MissingObject:
+    let e = (MissingObject)getCurrentException()
+    newNodeError($e.cid & " not in store", ast[])
 
 proc main() =
   var

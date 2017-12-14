@@ -1,7 +1,13 @@
 import asyncdispatch, asyncfile, streams, strutils, os, ipld, cbor, multiformats, hex, ropes
 
 type
-  MissingObject* = object of SystemError
+  MissingObject* = ref object of SystemError
+    cid*: Cid ## Missing object identifier
+
+proc newMissingObject*(cid: Cid): MissingObject =
+  MissingObject(msg: "object missing from store", cid: cid)
+
+type
   IpldStore* = ref IpldStoreObj
   IpldStoreObj* = object of RootObj
     closeImpl*: proc (s: IpldStore) {.nimcall, gcsafe.}
@@ -112,7 +118,7 @@ proc fsGetRaw(s: IpldStore; cid: Cid): Future[string] =
       discard tryRemoveFile path
         # bad block, remove it
   if not result.finished:
-    result.fail newException(MissingObject, $cid)
+    result.fail cid.newMissingObject
 
 proc fsPutDag(s: IpldStore; dag: Dag): Future[Cid] {.async.} =
   var fs = FileStore(s)
