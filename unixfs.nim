@@ -77,8 +77,7 @@ proc toCbor*(root: UnixFsNode): CborNode =
   # TODO: the CBOR maps must be sorted
 
 proc parseUnixfs*(c: CborNode; cid: Cid): UnixFsNode =
-  doAssert(not c.isNil)
-  doAssert(c.kind == cborMap)
+  assert(not c.isNil)
   result = newUnixFsRoot()
   result.cid = cid
   for k, v in c.map.pairs:
@@ -102,12 +101,6 @@ proc toStream*(dir: UnixFsNode; s: Stream) =
   doAssert(dir.kind == rootNode)
   let c = dir.toCbor()
   c.toStream s
-
-iterator walk*(node: UnixFsNode): (string, UnixFsNode) {.deprecated.} =
-  doAssert(not node.isNil)
-  if node.kind == rootNode:
-    for k, v in node.entries.pairs:
-      yield (k, v)
 
 iterator items*(root: UnixFsNode): (string, UnixFsNode) =
   assert(not root.isNil)
@@ -185,30 +178,21 @@ proc addDir*(store: IpldStore; dirPath: string): Future[UnixFsNode] {.async.} =
 proc openDir*(store: IpldStore; cid: Cid): Future[UnixfsNode] {.async.} =
   assert cid.isValid
   let dag = await store.getDag(cid)
+  assert(not dag.isNil)
   result = parseUnixfs(dag, cid)
   assert(result.kind == rootNode)
 
-proc rootName(path: string): string =
-  var first, last: int
-  while first < path.len and path[first] == DirSep:
-    inc first
-  last = first
-  while last < path.high and path[last+1] != DirSep:
-    inc last
-  path[first..last]
-
-proc walk*(store: IpldStore; dir: UnixfsNode; path: string): Future[UnixfsNode] {.async.} =
+proc walk*(store: IpldStore; root: UnixfsNode; path: string): Future[UnixfsNode] {.async.} =
   ## Walk a path down a root.
-  assert dir.cid.isValid
+  assert root.cid.isValid
   assert(path != "")
-  result = dir
+  result = root
   for name in split(path, DirSep):
     if name == "": continue
     if result.kind == fileNode:
       result = nil
       break
     result = result[name]
-    assert result.cid.isValid
     if result.isNil: break
     if result.kind == dirNode:
       result = await store.openDir result.cid
@@ -275,7 +259,7 @@ proc dumpPaths*(paths: var seq[string]; store: FileStore; cid: Cid) =
           for link in dag["links"].items:
             paths.dumpPaths(store, link["cid"].getBytes.parseCid)
         of rootNode:
-          for _, u in ufsNode.walk:
+          for _, u in ufsNode.items:
             paths.dumpPaths(store, u.cid)
         of dirNode:
           raiseAssert "cannot dump child dir"

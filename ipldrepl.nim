@@ -450,7 +450,7 @@ proc lsFunc(env: Env; args: NodeObj): Node =
     if a.cid.isDagCbor:
         let ufsNode = env.getUnixfs a.cid
         if ufsNode.kind == rootNode:
-          for name, u in ufsNode.walk:
+          for name, u in ufsNode.items:
             assert(not name.isNil)
             assert(not u.isNil, name & " is nil")
             case u.kind:
@@ -473,7 +473,7 @@ proc mergeFunc(env: Env; args: NodeObj): Node =
     let a = n.atom
     doAssert(a.cid.codec == MulticodecTag.Dag_cbor, "not a CBOR encoded IPLD block")
     let dir = env.getUnixfs a.cid
-    for name, node in dir.walk:
+    for name, node in dir.items:
       root.add(name, node)
   let cid = waitFor env.store.putDag(root.toCbor)
   cid.newAtom.newNode

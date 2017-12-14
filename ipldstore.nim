@@ -8,7 +8,6 @@ type
     putRawImpl*: proc (s: IpldStore; blk: string): Future[Cid] {.nimcall, gcsafe.}
     getRawImpl*: proc (s: IpldStore; cid: Cid): Future[string] {.nimcall, gcsafe.}
     putDagImpl*: proc (s: IpldStore; dag: Dag): Future[Cid] {.nimcall, gcsafe.}
-    getDagImpl*: proc (s: IpldStore; cid: Cid): Future[Dag] {.nimcall, gcsafe.}
     fileStreamImpl*: proc (s: IpldStore; cid: Cid; fut: FutureStream[string]): Future[void] {.nimcall, gcsafe.}
 
 proc close*(s: IpldStore) =
@@ -24,7 +23,8 @@ proc getRaw*(s: IpldStore; cid: Cid): Future[string] =
   ## Retrieve a raw block from the store.
   assert cid.isValid
   assert(not s.getRawImpl.isNil)
-  s.getRawImpl(s, cid)
+  result = s.getRawImpl(s, cid)
+  echo "returning future for generic getRaw"
 
 proc putDag*(s: IpldStore; dag: Dag): Future[Cid] =
   ## Place an IPLD node in the store.
@@ -34,8 +34,10 @@ proc putDag*(s: IpldStore; dag: Dag): Future[Cid] =
 proc getDag*(s: IpldStore; cid: Cid): Future[Dag] {.async.} =
   ## Retrieve an IPLD node from the store.
   assert cid.isValid
-  assert(not s.getDagImpl.isNil)
-  result = await s.getDagImpl(s, cid)
+  assert(not s.getRawImpl.isNil)
+  let raw = await s.getRawImpl(s, cid)
+  assert(not raw.isNil)
+  result = parseDag raw
 
 proc fileStream*(s: IpldStore; cid: Cid; fut: FutureStream[string]): Future[void] {.async.} =
   ## Asynchronously stream a file from a CID list.
@@ -96,7 +98,8 @@ proc fsPutRaw(s: IpldStore; blk: string): Future[Cid] {.async.} =
   let cid = blk.CidSha256
   await fs.putToFile(cid, blk)
 
-proc fsGetRaw(s: IpldStore; cid: Cid): Future[string] {.async.} =
+proc fsGetRaw(s: IpldStore; cid: Cid): Future[string] =
+  result = newFuture[string]("fsGetRaw")
   var fs = FileStore(s)
   let (_, path) = fs.parentAndFile cid
   if existsFile path:
@@ -104,10 +107,12 @@ proc fsGetRaw(s: IpldStore; cid: Cid): Future[string] {.async.} =
     let blk = file.readAll()
     close file
     if cid.verify(blk):
-      result = blk
+      result.complete blk
     else:
       discard tryRemoveFile path
         # bad block, remove it
+  if not result.finished:
+    result.fail newException(MissingObject, $cid)
 
 proc fsPutDag(s: IpldStore; dag: Dag): Future[Cid] {.async.} =
   var fs = FileStore(s)
@@ -116,10 +121,6 @@ proc fsPutDag(s: IpldStore; dag: Dag): Future[Cid] {.async.} =
     cid = blk.CidSha256(MulticodecTag.DagCbor)
   await fs.putToFile(cid, blk)
   result = cid
-
-proc fsGetDag(s: IpldStore; cid: Cid): Future[Dag] {.async.} =
-  let raw = await FileStore(s).fsGetRaw(cid)
-  result = parseDag raw
 
 proc fsFileStreamRecurs(fs: FileStore; cid: Cid; fut: FutureStream[string]) {.async.} =
   if cid.isRaw:
@@ -134,7 +135,7 @@ proc fsFileStreamRecurs(fs: FileStore; cid: Cid; fut: FutureStream[string]) {.as
         await fut.write(data)
       close file
   elif cid.isDagCbor:
-    let dag = await fs.fsGetDag(cid)
+    let dag = await fs.getDag(cid)
     doAssert(not dag.isNil)
     doAssert(dag.contains("links"), $dag & " does not contain 'links'")
     for link in dag.items:
@@ -156,6 +157,5 @@ proc newFileStore*(root: string): FileStore =
   result.putRawImpl = fsPutRaw
   result.getRawImpl = fsGetRaw
   result.putDagImpl = fsPutDag
-  result.getDagImpl = fsGetDag
   result.fileStreamImpl = fsFileStream
   result.root = root
