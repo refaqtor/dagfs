@@ -5,7 +5,6 @@ type Cid* = object
   hash*: MulticodecTag
   codec*: MulticodecTag
   ver*: int
-  logicalLen*: int # not included in canonical representation
 
 proc initCid*(): Cid =
   ## Initialize an invalid CID.
@@ -46,7 +45,8 @@ proc toBin(cid: Cid): string =
 proc toRaw*(cid: Cid): string =
   MultibaseTag.Identity.char & cid.toBIn
 
-proc toCbor*(cid: Cid): CborNode = newCborBytes cid.toRaw
+proc newCborBytes*(cid: Cid): CborNode = newCborBytes cid.toRaw
+proc toCbor*(cid: Cid): CborNode {.deprecated.} = cid.newCborBytes
 
 proc toHex*(cid: Cid): string =
   MultibaseTag.Base16.char & hex.encode(cid.toBin)
@@ -85,15 +85,13 @@ proc parseCid*(s: string): Cid =
   result.digest = raw[off..raw.high]
   result.hash = hash.MulticodecTag
   result.codec = codec.MulticodecTag
-  result.logicalLen = -1
 
 proc CidSha256*(data: string; codec = MulticodecTag.Raw): Cid =
   Cid(
     digest: $computeSHA256(data),
     hash: MulticodecTag.Sha2_256,
     codec: codec,
-    ver: 1,
-    logicalLen: data.len)
+    ver: 1)
 
 proc verify*(cid: Cid; data: string): bool =
   case cid.hash
@@ -139,13 +137,13 @@ proc merge*(dag, other: Dag) =
     result = newCborArray()
     dag["links"] = result
   if not otherLinks.isNil:
-    for link in otherlinks.list:
+    for link in otherlinks.seq:
       block insert:
         var i: int
-        while i < result.list.len:
-          let L = result.list[i]
+        while i < result.seq.len:
+          let L = result.seq[i]
           if L["name"].getString == link["name"].getString:
-            result.list[i] = link
+            result.seq[i] = link
               # replace
             break insert
           inc i
@@ -169,8 +167,8 @@ proc fileLen*(dag: Dag; name: string): int =
 ]#
 
 iterator simpleChunks*(s: Stream; size = 256 * 1024): (Cid, string) =
+  var result: (Cid, string)
   while not s.atEnd:
-    var result: (Cid, string)
     result[1] = s.readStr size
     result[0] = result[1].CidSHA256(MulticodecTag.Raw)
     yield result

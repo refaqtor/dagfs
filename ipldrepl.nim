@@ -1,4 +1,4 @@
-import rdstdin, nre, os, strutils, tables, asyncdispatch, asyncstreams, parseopt, streams
+import rdstdin, nre, os, strutils, tables, asyncdispatch, asyncstreams, parseopt, streams, cbor
 
 import ipld, ipldstore, unixfs, multiformats
 
@@ -154,10 +154,6 @@ proc append(list: NodeRef; n: NodeObj) =
   p[] = n
   list.append p
 
-proc isAtom(n: Node): bool = n.kind == nodeAtom
-proc isFunc(n: Node): bool = n.kind == nodeFunc
-proc isList(n: Node): bool = n.kind == nodeList
-
 proc getFile(env: Env; path: string): UnixFsNode =
   result = env.paths.getOrDefault path
   if result.isNil:
@@ -188,9 +184,8 @@ proc getUnixfs(env: Env; cid: Cid): UnixFsNode =
   assert cid.isValid
   result = env.cids.getOrDefault cid
   if result.isNil:
-    let dag = waitFor env.store.getDag(cid)
-    assert(not dag.isNil)
-    result = parseUnixfs(dag, cid)
+    let raw = waitFor env.store.get(cid)
+    result = parseUnixfs(raw, cid)
     env.cids[cid] = result
     when not defined(release):
       inc env.cidCacheMiss
@@ -230,7 +225,7 @@ proc print(a: Atom; s: Stream) =
     s.write ':'
     s.write a.fName
     s.write ':'
-    s.write $a.file.fSize
+    s.write $a.file.size
   of atomDir:
     s.write "\n"
     s.write $a.dir.cid
@@ -380,6 +375,16 @@ proc catFunc(env: Env; arg: NodeObj): Node =
 ]#
   result = newNodeError("cat not implemented", arg)
 
+proc cborFunc(env: Env; arg: NodeObj): Node =
+  let a = arg.atom
+  if a.cid.isDagCbor:
+    let
+      ufsNode = env.getUnixfs a.cid
+      diag = $ufsNode.toCbor
+    diag.newAtomString.newNode
+  else:
+    "".newAtomString.newNode
+
 proc consFunc(env: Env; args: NodeObj): Node =
   result = newNodeList()
   let
@@ -449,14 +454,14 @@ proc lsFunc(env: Env; args: NodeObj): Node =
     let a = n.atom
     if a.cid.isDagCbor:
         let ufsNode = env.getUnixfs a.cid
-        if ufsNode.kind == rootNode:
+        if ufsNode.isDir:
           for name, u in ufsNode.items:
             assert(not name.isNil)
             assert(not u.isNil, name & " is nil")
             case u.kind:
-            of fileNode:
+            of fileNode, shallowFile:
               result.append Atom(kind: atomFile, fName: name, file: u).newNode
-            of dirNode, rootNode:
+            of dirNode, shallowDir:
               result.append Atom(kind: atomDir, dName: name, dir: u).newNode
     else:
       raiseAssert("ls over a raw IPLD block")
@@ -519,6 +524,7 @@ proc newEnv(storePath: string): Env =
     cids: initTable[Cid, UnixfsNode]())
   result.bindEnv "apply", applyFunc
   result.bindEnv "cat", catFunc
+  result.bindEnv "cbor", cborFunc
   result.bindEnv "cons", consFunc
   result.bindEnv "define", defineFunc
   result.bindEnv "dump", dumpFunc

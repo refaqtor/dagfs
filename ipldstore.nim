@@ -11,41 +11,45 @@ type
   IpldStore* = ref IpldStoreObj
   IpldStoreObj* = object of RootObj
     closeImpl*: proc (s: IpldStore) {.nimcall, gcsafe.}
-    putRawImpl*: proc (s: IpldStore; blk: string): Future[Cid] {.nimcall, gcsafe.}
-    getRawImpl*: proc (s: IpldStore; cid: Cid): Future[string] {.nimcall, gcsafe.}
-    putDagImpl*: proc (s: IpldStore; dag: Dag): Future[Cid] {.nimcall, gcsafe.}
+    putImpl*: proc (s: IpldStore; blk: string): Future[Cid] {.nimcall, gcsafe.}
+    getImpl*: proc (s: IpldStore; cid: Cid): Future[string] {.nimcall, gcsafe.}
     fileStreamImpl*: proc (s: IpldStore; cid: Cid; fut: FutureStream[string]): Future[void] {.nimcall, gcsafe.}
 
 proc close*(s: IpldStore) =
   ## Close active store resources.
   if not s.closeImpl.isNil: s.closeImpl(s)
 
-proc putRaw*(s: IpldStore; blk: string): Future[Cid] =
+proc put*(s: IpldStore; blk: string): Future[Cid] =
   ## Place a raw block to the store.
-  assert(not s.putRawImpl.isNil)
-  s.putRawImpl(s, blk)
+  assert(not s.putImpl.isNil)
+  s.putImpl(s, blk)
 
-proc getRaw*(s: IpldStore; cid: Cid): Future[string] =
+proc get*(s: IpldStore; cid: Cid): Future[string] =
   ## Retrieve a raw block from the store.
   assert cid.isValid
-  assert(not s.getRawImpl.isNil)
-  result = s.getRawImpl(s, cid)
-  echo "returning future for generic getRaw"
+  assert(not s.getImpl.isNil)
+  s.getImpl(s, cid)
+ 
+{.deprecated: [putRaw: put, getRaw: get].}
 
-proc putDag*(s: IpldStore; dag: Dag): Future[Cid] =
+proc putDag*(s: IpldStore; dag: Dag): Future[Cid] {.async.} =
   ## Place an IPLD node in the store.
-  assert(not s.putDagImpl.isNil)
-  s.putDagImpl(s, dag)
+  assert(not s.putImpl.isNil)
+  let
+    raw = dag.toBinary
+    cid = raw.CidSha256(MulticodecTag.DagCbor)
+  discard await s.putImpl(s, raw)
+  result = cid
 
 proc getDag*(s: IpldStore; cid: Cid): Future[Dag] {.async.} =
   ## Retrieve an IPLD node from the store.
   assert cid.isValid
-  assert(not s.getRawImpl.isNil)
-  let raw = await s.getRawImpl(s, cid)
+  assert(not s.getImpl.isNil)
+  let raw = await s.getImpl(s, cid)
   assert(not raw.isNil)
   result = parseDag raw
 
-proc fileStream*(s: IpldStore; cid: Cid; fut: FutureStream[string]): Future[void] {.async.} =
+proc fileStream*(s: IpldStore; cid: Cid; fut: FutureStream[string]): Future[void] {.async, deprecated.} =
   ## Asynchronously stream a file from a CID list.
   ## TODO: doesn't need to be a file, can be a raw CID or
   ## a DAG that is simply a list of other CIDs.
@@ -55,7 +59,7 @@ proc fileStream*(s: IpldStore; cid: Cid; fut: FutureStream[string]): Future[void
   else:
     # use the simple implementation
     if cid.isRaw:
-      let blk = await s.getRaw(cid)
+      let blk = await s.get(cid)
       await fut.write(blk)
     elif cid.isDagCbor:
       let dag = await s.getDag(cid)
@@ -99,13 +103,13 @@ proc putToFile(fs: FileStore; cid: Cid; blk: string) {.async.} =
     close file
     moveFile(tmp, path)
 
-proc fsPutRaw(s: IpldStore; blk: string): Future[Cid] {.async.} =
+proc fsPut(s: IpldStore; blk: string): Future[Cid] {.async.} =
   var fs = FileStore(s)
   let cid = blk.CidSha256
   await fs.putToFile(cid, blk)
 
-proc fsGetRaw(s: IpldStore; cid: Cid): Future[string] =
-  result = newFuture[string]("fsGetRaw")
+proc fsGet(s: IpldStore; cid: Cid): Future[string] =
+  result = newFuture[string]("fsGet")
   var fs = FileStore(s)
   let (_, path) = fs.parentAndFile cid
   if existsFile path:
@@ -119,14 +123,6 @@ proc fsGetRaw(s: IpldStore; cid: Cid): Future[string] =
         # bad block, remove it
   if not result.finished:
     result.fail cid.newMissingObject
-
-proc fsPutDag(s: IpldStore; dag: Dag): Future[Cid] {.async.} =
-  var fs = FileStore(s)
-  let
-    blk = dag.toBinary
-    cid = blk.CidSha256(MulticodecTag.DagCbor)
-  await fs.putToFile(cid, blk)
-  result = cid
 
 proc fsFileStreamRecurs(fs: FileStore; cid: Cid; fut: FutureStream[string]) {.async.} =
   if cid.isRaw:
@@ -160,8 +156,7 @@ proc newFileStore*(root: string): FileStore =
   if not existsDir(root):
     createDir root
   new result
-  result.putRawImpl = fsPutRaw
-  result.getRawImpl = fsGetRaw
-  result.putDagImpl = fsPutDag
+  result.putImpl = fsPut
+  result.getImpl = fsGet
   result.fileStreamImpl = fsFileStream
   result.root = root

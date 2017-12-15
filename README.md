@@ -12,6 +12,11 @@ A Lisp REPL utility for storing files and directories in IPLD.
 
 Standard Lisp `apply` function, apply a list as arguments to a function.
 
+#### `(cbor <cid>)`
+
+Return CBOR encoding of UnixFS node as a diagnostic string.
+Provided for illustrating canonicalized CBOR encoding.
+
 #### `(cons <head> <tail>)`
 
 Standard Lisp `cons` function, prepend to a list.
