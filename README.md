@@ -21,6 +21,10 @@ Provided for illustrating canonicalized CBOR encoding.
 
 Standard Lisp `cons` function, prepend to a list.
 
+#### `(copy <cid> <from> <to>)`
+
+Duplicate a directory entry.
+
 #### `(define <symbol> <value>)`
 
 Bind a value to a symbol. Returns value.

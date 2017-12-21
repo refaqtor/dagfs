@@ -1,4 +1,4 @@
-import rdstdin, nre, os, strutils, tables, asyncdispatch, asyncstreams, parseopt, streams, cbor
+import nre, os, strutils, tables, parseopt, streams, cbor
 
 import ipld, ipldstore, unixfs, multiformats
 
@@ -11,8 +11,6 @@ type
   AtomKind = enum
     atomPath
     atomCid
-    atomFile
-    atomDir
     atomString
     atomSymbol
     atomError
@@ -23,12 +21,6 @@ type
       path: string
     of atomCid:
       cid: Cid
-    of atomFile:
-      fName: string
-      file: UnixfsNode
-    of atomDir:
-      dName:string
-      dir: UnixfsNode
     of atomString:
       str: string
     of atomSymbol:
@@ -36,7 +28,7 @@ type
     of atomError:
       err: string
 
-  Func = proc(env: Env; arg: NodeObj): Node
+  Func = proc(env: Env; arg: NodeObj): NodeRef
 
   NodeKind = enum
     nodeError
@@ -44,9 +36,10 @@ type
     nodeAtom
     nodeFunc
 
-  Node = ref NodeObj
   NodeRef = ref NodeObj
+    ## NodeRef is used to chain nodes into lists.
   NodeObj = object
+    ## NodeObj is used to mutate nodes without side-effects.
     case kind: NodeKind
     of nodeList:
       headRef, tailRef: NodeRef
@@ -61,18 +54,13 @@ type
     nextRef: NodeRef
 
   EnvObj = object
-    store: FileStore
+    store: IpldStore
     bindings: Table[string, NodeObj]
     paths: Table[string, UnixfsNode]
     cids: Table[Cid, UnixfsNode]
-    when not defined(release):
-      pathCacheHit: int
-      pathCacheMiss: int
-      cidCacheHit: int
-      cidCacheMiss: int
 
 proc print(a: Atom; s: Stream)
-proc print(ast: Node; s: Stream)
+proc print(ast: NodeRef; s: Stream)
 
 proc newAtom(c: Cid): Atom =
   Atom(kind: atomCid, cid: c)
@@ -90,28 +78,20 @@ proc newAtomPath(s: string): Atom =
 proc newAtomString(s: string): Atom =
   Atom(kind: atomString, str: s)
 
-#[
-template evalAssert(cond, n: Node, msg = "") =
-  if not cond:
-    let err = newException(EvalError, msg)
-    err.node = n
-    raise err
-]#
-
 proc newNodeError(msg: string; n: NodeObj): NodeRef =
-  var p = new Node
+  var p = new NodeRef
   p[] = n
-  Node(kind: nodeError, errMsg: msg, errNode: p)
+  NodeRef(kind: nodeError, errMsg: msg, errNode: p)
 
-proc newNode(a: Atom): Node =
-  Node(kind: nodeAtom, atom: a)
+proc newNode(a: Atom): NodeRef =
+  NodeRef(kind: nodeAtom, atom: a)
 
-proc newNodeList(): Node =
-  Node(kind: nodeList)
+proc newNodeList(): NodeRef =
+  NodeRef(kind: nodeList)
 
 proc next(n: NodeObj | NodeRef): NodeObj =
   ## Return a copy of list element that follows Node n.
-  assert(not n.nextRef.isNil)
+  assert(not n.nextRef.isNil, "next element is nil")
   result = n.nextRef[]
 
 proc head(list: NodeObj | NodeRef): NodeObj =
@@ -120,7 +100,7 @@ proc head(list: NodeObj | NodeRef): NodeObj =
 
 proc `next=`(n, p: NodeRef) =
   ## Return a copy of list element that follows Node n.
-  assert(n.nextRef.isNil)
+  assert(n.nextRef.isNil, "append to node that is not at the end of a list")
   n.nextRef = p
 
 iterator list(n: NodeObj): NodeObj =
@@ -157,42 +137,25 @@ proc append(list: NodeRef; n: NodeObj) =
 proc getFile(env: Env; path: string): UnixFsNode =
   result = env.paths.getOrDefault path
   if result.isNil:
-    result = waitFor env.store.addFile(path)
+    result = env.store.addFile(path)
     assert(not result.isNil)
     env.paths[path] = result
-    when not defined(release):
-      inc env.pathCacheMiss
-  else:
-    when not defined(release):
-      inc env.pathCacheHit
-    else: discard
 
 proc getDir(env: Env; path: string): UnixFsNode =
   result = env.paths.getOrDefault path
   if result.isNil:
-    result = waitFor env.store.addDir(path)
+    result = env.store.addDir(path)
     assert(not result.isNil)
     env.paths[path] = result
-    when not defined(release):
-      inc env.pathCacheMiss
-  else:
-    when not defined(release):
-      inc env.pathCacheHit
-    else: discard
 
 proc getUnixfs(env: Env; cid: Cid): UnixFsNode =
   assert cid.isValid
   result = env.cids.getOrDefault cid
   if result.isNil:
-    let raw = waitFor env.store.get(cid)
+    var raw = ""
+    env.store.get(cid, raw)
     result = parseUnixfs(raw, cid)
     env.cids[cid] = result
-    when not defined(release):
-      inc env.cidCacheMiss
-  else:
-    when not defined(release):
-      inc env.cidCacheHit
-    else: discard
 
 type
   Tokens = seq[string]
@@ -220,17 +183,6 @@ proc print(a: Atom; s: Stream) =
     s.write a.path
   of atomCid:
     s.write $a.cid
-  of atomFile:
-    s.write $a.file.cid
-    s.write ':'
-    s.write a.fName
-    s.write ':'
-    s.write $a.file.size
-  of atomDir:
-    s.write "\n"
-    s.write $a.dir.cid
-    s.write ':'
-    s.write a.dName
   of atomString:
     s.write '"'
     s.write a.str
@@ -240,7 +192,7 @@ proc print(a: Atom; s: Stream) =
     let fut = newFutureStream[string]()
     asyncCheck env.store.fileStream(a.fileCid, fut)
     while true:
-      let (valid, chunk) = waitFor fut.read()
+      let (valid, chunk) = fut.read()
       if not valid: break
       f.write chunk
     ]#
@@ -256,11 +208,11 @@ proc print(ast: NodeObj; s: Stream) =
   of nodeAtom:
     ast.atom.print(s)
   of nodeList:
-    s.write "("
+    s.write "\n("
     for n in ast.list:
-      s.write "\n"
+      s.write " "
       n.print(s)
-    s.write "\n)"
+    s.write ")"
   of nodeFunc:
     s.write "#<procedure "
     s.write ast.name
@@ -273,7 +225,10 @@ proc print(ast: NodeObj; s: Stream) =
     s.write "»"
 
 proc print(ast: NodeRef; s: Stream) =
-  ast[].print s
+  if ast.isNil:
+    s.write "«nil»"
+  else:
+    ast[].print s
 
 proc readAtom(r: Reader): Atom =
   let token = r.next
@@ -293,25 +248,9 @@ proc readAtom(r: Reader): Atom =
   except:
     newAtomError(getCurrentExceptionMsg())
 
-#[
-proc chainData(end: Atom; a: Atom; env: Env): Atom =
-  ## Convert an atom to data and chain it to the end of a data chain,
-  ## return the new end of the chain.
-  var next: Atom
-  case a.kind:
-  of atomData:
-    next = a
-  else: discard
-  if end.isNil:
-    result = next
-  else:
-    doAsset(end.nextData.isNil)
-    end.nextData = next
-]#
+proc readForm(r: Reader): NodeRef
 
-proc readForm(r: Reader): Node
-
-proc readList(r: Reader): Node =
+proc readList(r: Reader): NodeRef =
   result = newNodeList()
   while true:
     if (r.pos == r.tokens.len):
@@ -324,7 +263,7 @@ proc readList(r: Reader): Node =
     else:
       result.append r.readForm
 
-proc readForm(r: Reader): Node =
+proc readForm(r: Reader): NodeRef =
   case r.peek[0]
   of '(':
     discard r.next
@@ -341,7 +280,7 @@ proc tokenizer(s: string): Tokens =
     if t.len > 0:
       result.add t
 
-proc read(r: Reader; line: string): Node =
+proc read(r: Reader; line: string): NodeRef =
   r.pos = 0
   if r.buffer.len > 0:
     r.buffer.add " "
@@ -355,27 +294,26 @@ proc read(r: Reader; line: string): Node =
   else:
     r.buffer.setLen 0
 
+proc assertArgCount(args: NodeObj; len: int) =
+  var arg = args
+  for _ in 2..len:
+    doAssert(not arg.nextRef.isNil)
+    arg = arg.next
+  doAssert(arg.nextRef.isNil)
+
 ##
 # Builtin functions
 #
 
-proc applyFunc(env: Env; args: NodeObj): Node =
+proc applyFunc(env: Env; args: NodeObj): NodeRef =
+  assertArgCount(args, 2)
   let
     fn = args
     ln = fn.next
   fn.fun(env, ln.head)
 
-proc catFunc(env: Env; arg: NodeObj): Node =
-#[
-  result = Atom(kind: atomData).newNode
-  var atom = result.atom
-  for n in args:
-    assert(n.kind == nodeAtom, "cat called on a non-atomic node")
-    #atom = atom.chainData(n.atom, env)
-]#
-  result = newNodeError("cat not implemented", arg)
-
-proc cborFunc(env: Env; arg: NodeObj): Node =
+proc cborFunc(env: Env; arg: NodeObj): NodeRef =
+  assertArgCount(arg, 1)
   let a = arg.atom
   if a.cid.isDagCbor:
     let
@@ -385,7 +323,22 @@ proc cborFunc(env: Env; arg: NodeObj): Node =
   else:
     "".newAtomString.newNode
 
-proc consFunc(env: Env; args: NodeObj): Node =
+proc copyFunc(env: Env; args: NodeObj): NodeRef =
+  assertArgCount(args, 3)
+  let
+    x = args
+    y = x.next
+    z = y.next
+  var root = newUnixFsRoot()
+  let dir = env.getUnixfs x.atom.cid
+  for name, node in dir.items:
+    root.add(name, node)
+  root.add(z.atom.str, dir[y.atom.str])
+  let cid = env.store.putDag(root.toCbor)
+  cid.newAtom.newNode
+
+proc consFunc(env: Env; args: NodeObj): NodeRef =
+  assertArgCount(args, 2)
   result = newNodeList()
   let
     car = args
@@ -393,7 +346,8 @@ proc consFunc(env: Env; args: NodeObj): Node =
   result.append car
   result.append cdr.head
 
-proc defineFunc(env: Env; args: NodeObj): Node =
+proc defineFunc(env: Env; args: NodeObj): NodeRef =
+  assertArgCount(args, 2)
   let
     symN = args
     val = args.next
@@ -401,14 +355,14 @@ proc defineFunc(env: Env; args: NodeObj): Node =
   new result
   result[] = val
 
-proc dumpFunc(env: Env; args: NodeObj): Node =
+proc dumpFunc(env: Env; args: NodeObj): NodeRef =
   result = newNodeList()
   for n in args.walk:
     let a = n.atom
     for p in env.store.dumpPaths(a.cid):
       result.append p.newAtomString.newNode
 
-proc globFunc(env: Env; args: NodeObj): Node =
+proc globFunc(env: Env; args: NodeObj): NodeRef =
   result = newNodeList()
   for n in args.walk:
     let a = n.atom
@@ -421,7 +375,7 @@ proc globFunc(env: Env; args: NodeObj): Node =
     else:
       result = newNodeError("invalid glob argument", n)
 
-proc ingestFunc(env: Env; args: NodeObj): Node =
+proc ingestFunc(env: Env; args: NodeObj): NodeRef =
   var root = newUnixFsRoot()
   for n in args.walk:
     let
@@ -436,10 +390,10 @@ proc ingestFunc(env: Env; args: NodeObj): Node =
       let dir = env.getDir a.path
       root.add(name, dir)
   let
-    cid = waitFor env.store.putDag(root.toCbor)
+    cid = env.store.putDag(root.toCbor)
   cid.newAtom.newNode
 
-proc listFunc(env: Env; args: NodeObj): Node =
+proc listFunc(env: Env; args: NodeObj): NodeRef =
   ## Standard Lisp 'list' function.
   result = newNodeList()
   new result.headRef
@@ -448,7 +402,7 @@ proc listFunc(env: Env; args: NodeObj): Node =
   while not result.tailRef.nextRef.isNil:
     result.tailRef = result.tailRef.nextRef
 
-proc lsFunc(env: Env; args: NodeObj): Node =
+proc lsFunc(env: Env; args: NodeObj): NodeRef =
   result = newNodeList()
   for n in args.walk:
     let a = n.atom
@@ -458,21 +412,21 @@ proc lsFunc(env: Env; args: NodeObj): Node =
           for name, u in ufsNode.items:
             assert(not name.isNil)
             assert(not u.isNil, name & " is nil")
-            case u.kind:
-            of fileNode, shallowFile:
-              result.append Atom(kind: atomFile, fName: name, file: u).newNode
-            of dirNode, shallowDir:
-              result.append Atom(kind: atomDir, dName: name, dir: u).newNode
+            let e = newNodeList()
+            e.append u.cid.newAtom.newNode
+            e.append name.newAtomString.newNode
+            result.append e
     else:
       raiseAssert("ls over a raw IPLD block")
 
-proc mapFunc(env: Env; args: NodeObj): Node =
+proc mapFunc(env: Env; args: NodeObj): NodeRef =
+  assertArgCount(args, 2)
   result = newNodeList()
   let f = args.fun
   for v in args.next.list:
     result.append f(env, v)
 
-proc mergeFunc(env: Env; args: NodeObj): Node =
+proc mergeFunc(env: Env; args: NodeObj): NodeRef =
   var root = newUnixFsRoot()
   for n in args.walk:
     let a = n.atom
@@ -480,29 +434,29 @@ proc mergeFunc(env: Env; args: NodeObj): Node =
     let dir = env.getUnixfs a.cid
     for name, node in dir.items:
       root.add(name, node)
-  let cid = waitFor env.store.putDag(root.toCbor)
+  let cid = env.store.putDag(root.toCbor)
   cid.newAtom.newNode
 
-proc pathFunc(env: Env; arg: NodeObj): Node =
+proc pathFunc(env: Env; arg: NodeObj): NodeRef =
   result = arg.atom.str.newAtomPath.newNode
 
-proc rootFunc(env: Env; args: NodeObj): Node =
+proc rootFunc(env: Env; args: NodeObj): NodeRef =
   var root = newUnixFsRoot()
   let
     name = args.atom.str
     cid = args.next.atom.cid
     ufs = env.getUnixfs cid
   root.add(name, ufs)
-  let rootCid = waitFor env.store.putDag(root.toCbor)
+  let rootCid = env.store.putDag(root.toCbor)
   rootCid.newAtom.newNode
 
-proc walkFunc(env: Env; args: NodeObj): Node =
+proc walkFunc(env: Env; args: NodeObj): NodeRef =
   assert args.atom.cid.isValid
   let
     rootCid = args.atom.cid
     walkPath = args.next.atom.str
     root = env.getUnixfs rootCid
-    final = waitFor env.store.walk(root, walkPath)
+    final = env.store.walk(root, walkPath)
   if final.isNil:
     result = newNodeError("no walk to '$1'" % walkPath, args)
   else:
@@ -516,16 +470,16 @@ proc bindEnv(env: Env; name: string; fun: Func) =
   assert(not env.bindings.contains name)
   env.bindings[name] = NodeObj(kind: nodeFunc, fun: fun, name: name)
 
-proc newEnv(storePath: string): Env =
+proc newEnv(store: IpldStore): Env =
   result = Env(
-    store: newFileStore(storePath),
+    store: store,
     bindings: initTable[string, NodeObj](),
     paths: initTable[string, UnixfsNode](),
     cids: initTable[Cid, UnixfsNode]())
   result.bindEnv "apply", applyFunc
-  result.bindEnv "cat", catFunc
   result.bindEnv "cbor", cborFunc
   result.bindEnv "cons", consFunc
+  result.bindEnv "copy", copyFunc
   result.bindEnv "define", defineFunc
   result.bindEnv "dump", dumpFunc
   result.bindEnv "glob", globFunc
@@ -537,9 +491,10 @@ proc newEnv(storePath: string): Env =
   result.bindEnv "path", pathFunc
   result.bindEnv "root", rootFunc
   result.bindEnv "walk", walkFunc
-proc eval(ast: Node; env: Env): Node
 
-proc eval_ast(ast: Node; env: Env): Node =
+proc eval(ast: NodeRef; env: Env): NodeRef
+
+proc eval_ast(ast: NodeRef; env: Env): NodeRef =
   result = ast
   case ast.kind
   of nodeList:
@@ -554,11 +509,12 @@ proc eval_ast(ast: Node; env: Env): Node =
   of nodeAtom:
     if ast.atom.kind == atomSymbol:
       if env.bindings.contains ast.atom.sym:
-        result = new Node
+        result = new NodeRef
         result[] = env.bindings[ast.atom.sym]
   else: discard
 
-proc eval(ast: Node; env: Env): Node =
+proc eval(ast: NodeRef; env: Env): NodeRef =
+  var input = ast[]
   try:
     if ast.kind == nodeList:
       if ast.headRef == nil:
@@ -568,51 +524,79 @@ proc eval(ast: Node; env: Env): Node =
           ast = eval_ast(ast, env)
           head = ast.headRef
         if head.kind == nodeFunc:
-          head.fun(env, head.next)
+          if not head.nextRef.isNil:
+            input = head.next
+            head.fun(env, input)
+          else:
+            input = NodeObj(kind: nodeList)
+            head.fun(env, input)
         else:
-          newNodeError("not a function", head[])
+          input = head[]
+          newNodeError("not a function", input)
     else:
       eval_ast(ast, env)
   except EvalError:
-    newNodeError(getCurrentExceptionMsg(), ast[])
+    newNodeError(getCurrentExceptionMsg(), input)
   except FieldError:
-    newNodeError("invalid argument", ast[])
+    newNodeError("invalid argument", input)
   except MissingObject:
-    let e = (MissingObject)getCurrentException()
-    newNodeError($e.cid & " not in store", ast[])
+    newNodeError("object not in store", input)
+  except OSError:
+    newNodeError(getCurrentExceptionMsg(), input)
 
-proc main() =
-  var
-    env: Env
-    interactive: bool
-  block:
+var scripted = false
+
+when defined(genode):
+  import ipldclient
+  proc openStore(): IpldStore =
+    result = newIpldClient("repl")
+    scripted = true # do not use linenoise for the moment
+    #[
+    for kind, key, value in getopt():
+      if kind == cmdShortOption and key == "s":
+        scripted = true
+      else:
+        quit "unhandled argument " & key
+    ]#
+else:
+  import ipfsdaemon
+  proc openStore(): IpldStore =
     for kind, key, value in getopt():
       case kind
-      of cmdArgument:
-        if not env.isNil:
-          quit "only a single store path argument is accepted"
-        env = newEnv(key)
-      of cmdLongOption:
-        if key == "interactive":
-          interactive = true
       of cmdShortOption:
-        if key == "i":
-          interactive = true
-      of cmdEnd:
-        discard
-    if env.isNil:
-      quit "store path must be passed as an argument"
+        if key == "s":
+          scripted = true
+        else:
+          quit "unhandled argument " & key
+      of cmdArgument:
+        if not result.isNil:
+          quit "only a single store path argument is accepted"
+        try:
+          result = if key.startsWith "http://":
+            newIpfsStore(key) else: newFileStore(key)
+        except:
+          quit("failed to open store at $1 ($2)" % [key, getCurrentExceptionMsg()])
+      else:
+        quit "unhandled argument " & key
+    if result.isNil:
+      quit "IPFS daemon URL must be specified"
 
-  let outStream = stdout.newFileStream
+import rdstdin
+
+proc readLineSimple(prompt: string; line: var TaintedString): bool =
+  stdin.readLine(line)
+
+proc main() =
+  let
+    store = openStore()
+    env = newEnv(store)
+    outStream = stdout.newFileStream
+    readLine = if scripted: readLineSimple else: readLineFromStdin
+
   var
     reader = newReader()
     line = newStringOfCap 128
-  while true:
-    if not stdin.readLine line:
-      when not defined(release):
-        stderr.writeLine "Path cache miss/hit ", env.pathCacheMiss, "/", env.pathCacheHit
-        stderr.writeLine " CID cache miss/hit ", env.cidCacheMiss, "/", env.cidCacheHit
-      quit()
+  while readLine("> ", line):
     if line.len > 0:
       let ast = reader.read(line)
       if not ast.isNil:
@@ -621,3 +605,4 @@ proc main() =
         flush outStream
 
 main()
+quit 0 # Genode doesn't implicitly quit

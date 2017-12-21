@@ -1,5 +1,7 @@
 import nimSHA2, streams, multiformats, base58.bitcoin, cbor, hex, hashes
 
+const MaxBlockSize* = 1 shl 18
+
 type Cid* = object
   digest*: string
   hash*: MulticodecTag

@@ -1,4 +1,4 @@
-import asyncdispatch, strutils, multiformats, streams, tables, cbor, os, hex, math
+import strutils, multiformats, streams, tables, cbor, os, hex, math
 
 import ipld, ipldstore
 
@@ -74,11 +74,24 @@ const
   DirTag* = 0xda3c80 ## CBOR tag for UnixFS directories
   FileTag* = 0xda3c81 ## CBOR tag for UnixFS files
 
+proc isUnixfs*(bin: string): bool =
+  ## Check if a string contains a UnixFS node
+  ## in CBOR form.
+  var
+    s = newStringStream bin
+    c: CborParser
+  try:
+    c.open s
+    c.next
+    if c.kind == CborEventKind.cborTag:
+      result = c.tag == DirTag or c.tag == FileTag
+  except ValueError: discard
+  close s
+
 proc toCbor*(u: UnixFsNode): CborNode =
   case u.kind
   of fileNode:
-    if u.links.isNil:
-      raiseAssert "cannot encode single-chunk files"
+    doAssert(not u.links.isNil, "cannot encode single-chunk files")
     let array = newCborArray()
     array.seq.setLen u.links.len
     for i in 0..u.links.high:
@@ -127,7 +140,7 @@ proc parseUnixfs*(raw: string; cid: Cid): UnixFsNode =
   open(c, newStringStream(raw))
   next c
   parseAssert(c.kind == CborEventKind.cborTag, "data not tagged")
-  let tag = c.parseTag
+  let tag = c.tag
   if tag == FileTag:
     result.kind = fileNode
     next c
@@ -141,7 +154,7 @@ proc parseUnixfs*(raw: string; cid: Cid): UnixFsNode =
       for _ in 1..nAttrs:
         next c
         parseAssert(c.kind == CborEventKind.cborPositive, "link map key not an integer")
-        let key = c.parseInt.EntryKey
+        let key = c.readInt.EntryKey
         next c
         case key
         of typeKey:
@@ -152,7 +165,7 @@ proc parseUnixfs*(raw: string; cid: Cid): UnixFsNode =
           result.links[i].cid = buf.parseCid
         of sizeKey:
           parseAssert(c.kind == CborEventKind.cborPositive, "link size not encoded properly")
-          result.links[i].size = c.parseInt
+          result.links[i].size = c.readInt
           result.size.inc result.links[i].size
   elif tag == DirTag:
     result.kind = dirNode
@@ -175,10 +188,10 @@ proc parseUnixfs*(raw: string; cid: Cid): UnixFsNode =
       for i in 1 .. nAttrs:
         next c
         parseAssert(c.kind == CborEventKind.cborPositive)
-        case c.parseInt.EntryKey
+        case c.readInt.EntryKey
         of typeKey:
           next c
-          case c.parseInt.UnixFsType
+          case c.readInt.UnixFsType
           of ufsFile: entry.kind = shallowFile
           of ufsDir: entry.kind = shallowDir
         of dataKey:
@@ -187,7 +200,7 @@ proc parseUnixfs*(raw: string; cid: Cid): UnixFsNode =
           entry.cid = buf.parseCid
         of sizeKey:
           next c
-          entry.size = c.parseInt
+          entry.size = c.readInt
   else:
     parseAssert(false, raw)
   next c
@@ -228,13 +241,13 @@ proc lookupFile*(dir: UnixFsNode; name: string): tuple[cid: Cid, size: BiggestIn
     result.cid = f.cid
     result.size = f.size
 
-proc addFile*(store: IpldStore; path: string): Future[UnixFsNode] {.async.} =
+proc addFile*(store: IpldStore; path: string): UnixFsNode =
   ## Add a file to the store and a UnixfsNode.
   let
     fStream = newFileStream(path, fmRead)
     u = newUnixfsFile()
   for cid, chunk in fStream.simpleChunks:
-    discard await store.put(chunk)
+    discard store.put(chunk)
     if u.links.isNil:
       u.links = newSeqOfCap[FileLink](1)
     u.links.add FileLink(cid: cid, size: chunk.len)
@@ -247,46 +260,46 @@ proc addFile*(store: IpldStore; path: string): Future[UnixFsNode] {.async.} =
       # take a shortcut use the raw chunk CID
       u.cid = u.links[0].cid
     else:
-      u.cid = await store.putDag(u.toCbor)
+      u.cid = store.putDag(u.toCbor)
   result = u
   close fStream
 
-proc addDir*(store: IpldStore; dirPath: string): Future[UnixFsNode] {.async.} =
+proc addDir*(store: IpldStore; dirPath: string): UnixFsNode =
   var dRoot = newUnixFsRoot()
   for kind, path in walkDir dirPath:
-    # need to use `waitFor` in this iterator
     var child: UnixFsNode
     case kind
     of pcFile:
-      child = waitFor store.addFile path
+      child = store.addFile path
     of pcDir:
-      child = waitFor store.addDir(path)
+      child = store.addDir(path)
     else: continue
     dRoot.add path.extractFilename, child
   let
     dag = dRoot.toCbor
-    cid = await store.putDag(dag)
+    cid = store.putDag(dag)
   result = newUnixfsDir(cid)
 
-proc open*(store: IpldStore; cid: Cid): Future[UnixfsNode] {.async.} =
+proc open*(store: IpldStore; cid: Cid): UnixfsNode =
   assert cid.isValid
   assert(not cid.isRaw)
-  let raw = await store.get(cid)
+  let raw = store.get(cid)
   result = parseUnixfs(raw, cid)
 
-proc openDir*(store: IpldStore; cid: Cid): Future[UnixfsNode] {.async.} =
+proc openDir*(store: IpldStore; cid: Cid): UnixfsNode =
   assert cid.isValid
-  let raw = await store.get(cid)
-  assert(not raw.isNil)
+  var raw = ""
+  try: store.get(cid, raw)
+  except MissingObject: raise cid.newMissingObject
+    # this sucks
   result = parseUnixfs(raw, cid)
   assert(result.kind == dirNode)
 
-proc walk*(store: IpldStore; dir: UnixfsNode; path: string; cache = true): Future[UnixfsNode] {.async.} =
+proc walk*(store: IpldStore; dir: UnixfsNode; path: string; cache = true): UnixfsNode =
   ## Walk a path down a root.
-  assert dir.cid.isValid
-  assert(path != "")
   assert(dir.kind == dirNode)
   result = dir
+  var raw = ""
   for name in split(path, DirSep):
     if name == "": continue
     if result.kind == fileNode:
@@ -297,40 +310,46 @@ proc walk*(store: IpldStore; dir: UnixfsNode; path: string; cache = true): Futur
       result = nil
       break
     if (next.kind in {shallowFile, shallowDir}) and (not next.cid.isRaw):
-      let raw = await store.get(next.cid)
+      store.get(next.cid, raw)
       next = parseUnixfs(raw, next.cid)
       if cache:
         result.entries[name] = next
     result = next
 
-iterator fileChunks*(store: IpldStore; file: UnixfsNode): Future[string] =
+#[
+iterator fileChunks*(store: IpldStore; file: UnixfsNode): string =
   ## Iterate over the links in a file and return futures for link data.
   if file.cid.isRaw:
     yield store.get(file.cid)
   else:
-    var i = 0
+    var
+      i = 0
+      chunk = ""
     while i < file.links.len:
-      yield store.get(file.links[i].cid)
+      store.get(file.links[i].cid, chunk)
+      yield chunk
       inc i
+]#
 
 proc readBuffer*(store: IpldStore; file: UnixfsNode; pos: BiggestInt;
-                 buf: pointer; size: int): Future[int] {.async.} =
+                 buf: pointer; size: int): int =
   ## Read a UnixFS file into a buffer. May return zero for any failure.
   assert(pos > -1)
   var
     filePos = 0
+    chunk = ""
   if pos < file.size:
     if file.cid.isRaw:
       let pos = pos.int
-      var blk = await store.get(file.cid)
-      if pos < blk.high:
-        copyMem(buf, blk[pos].addr, min(blk.len - pos, size))
+      store.get(file.cid, chunk)
+      if pos < chunk.high:
+        copyMem(buf, chunk[pos].addr, min(chunk.len - pos, size))
       result = size
     else:
       for i in 0..file.links.high:
         let linkSize = file.links[i].size
         if filePos <= pos and pos < filePos+linkSize:
-          var chunk = await store.get(file.links[i].cid)
+          store.get(file.links[i].cid, chunk)
           let
             chunkPos = int(pos - filePos)
             n = min(chunk.len-chunkPos, size)
@@ -339,7 +358,7 @@ proc readBuffer*(store: IpldStore; file: UnixfsNode; pos: BiggestInt;
           break
         filePos.inc linkSize
 
-proc path(fs: FileStore; cid: Cid): string =
+proc fileStorePath(cid: Cid): string =
   ## Generate the file path of a CID within the store.
   assert cid.isValid
   let digest = hex.encode(cid.digest)
@@ -355,24 +374,24 @@ proc path(fs: FileStore; cid: Cid): string =
     raise newException(SystemError, "unhandled hash type")
   result = hashType / digest[0..1] / digest[2..digest.high]
 
-proc dumpPaths*(paths: var seq[string]; store: FileStore; cid: Cid) =
+proc dumpPaths*(paths: var seq[string]; store: IpldStore; cid: Cid) =
   ## Recursively dump the constituent FileStore chunk files of a CID to a string seq.
   ## TODO: use CBOR tags rather than reconstitute UnixFS nodes.
-  paths.add store.path(cid)
+  paths.add cid.fileStorePath
   if cid.isDagCbor:
-    let u = waitFor store.open(cid)
+    let u = store.open(cid)
     case u.kind:
     of fileNode:
       assert(not u.links.isNil)
       for i in 0..u.links.high:
-        paths.add store.path(u.links[i].cid)
+        paths.add u.links[i].cid.fileStorePath
     of dirNode:
       for _, child in u.items:
         paths.dumpPaths(store, child.cid)
     else:
       raiseAssert "cannot dump shallow nodes"
 
-iterator dumpPaths*(store: FileStore; cid: Cid): string =
+iterator dumpPaths*(store: IpldStore; cid: Cid): string =
   var collector = newSeq[string]()
   collector.dumpPaths(store, cid)
   for p in collector:

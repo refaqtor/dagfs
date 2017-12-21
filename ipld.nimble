@@ -9,4 +9,4 @@ license       = "GPLv3"
 
 requires "nim >= 0.17.3", "nimSHA2", "base58", "cbor >= 0.2.0"
 
-bin = @["ipldrepl"]
+bin = @["ipldrepl","ipldcat"]
