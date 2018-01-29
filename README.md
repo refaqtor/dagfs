@@ -29,10 +29,6 @@ Duplicate a directory entry.
 
 Bind a value to a symbol. Returns value.
 
-#### `(dump <cid> <...>)`
-
-Return a list of paths as they appear in the builtin file store for a give list of CIDs.
-
 #### `(glob <glob-string> <...>)`
 
 Return a list of paths matching a Unix-style glob string.

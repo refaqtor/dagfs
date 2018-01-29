@@ -8,9 +8,9 @@ type
     cache: string
     cacheCid: Cid
 
-proc replicatedPut(s: IpldStore; blk: string): Cid =
+proc replicatedPut(s: IpldStore; blk: string; hash: MulticodecTag): Cid =
   var r = IpldReplicator s
-  r.toStore.put(blk)
+  r.toStore.put(blk, hash)
 
 proc replicatedGetBuffer(s: IpldStore; cid: Cid; buf: pointer; len: Natural): int =
   var r = IpldReplicator s
@@ -33,14 +33,14 @@ proc replicatedGetBuffer(s: IpldStore; cid: Cid; buf: pointer; len: Natural): in
       r.cache.setLen result
       copyMem(r.cache[0].addr, buf, result)
       assert(cid.verify(r.cache), "replicate cache is invalid after copy from From store")
-      discard r.toStore.put(r.cache)
+      discard r.toStore.put(r.cache, cid.hash)
 
 proc replicatedGet(s: IpldStore; cid: Cid; result: var string) =
   var r = IpldReplicator s
   try: r.toStore.get(cid, result)
   except MissingObject:
     r.fromStore.get(cid, result)
-    discard r.toStore.put(result)
+    discard r.toStore.put(result, cid.hash)
 
 proc newIpldReplicator*(toStore, fromStore: IpldStore): IpldReplicator =
   ## Blocks retrieved by `get` are not verified.

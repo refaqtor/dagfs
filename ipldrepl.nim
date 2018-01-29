@@ -355,13 +355,6 @@ proc defineFunc(env: Env; args: NodeObj): NodeRef =
   new result
   result[] = val
 
-proc dumpFunc(env: Env; args: NodeObj): NodeRef =
-  result = newNodeList()
-  for n in args.walk:
-    let a = n.atom
-    for p in env.store.dumpPaths(a.cid):
-      result.append p.newAtomString.newNode
-
 proc globFunc(env: Env; args: NodeObj): NodeRef =
   result = newNodeList()
   for n in args.walk:
@@ -481,7 +474,6 @@ proc newEnv(store: IpldStore): Env =
   result.bindEnv "cons", consFunc
   result.bindEnv "copy", copyFunc
   result.bindEnv "define", defineFunc
-  result.bindEnv "dump", dumpFunc
   result.bindEnv "glob", globFunc
   result.bindEnv "ingest", ingestFunc
   result.bindEnv "list", listFunc
@@ -572,10 +564,9 @@ else:
         if not result.isNil:
           quit "only a single store path argument is accepted"
         try:
-          result = if key.startsWith "http://":
-            newIpfsStore(key) else: newFileStore(key)
+          result = newIpfsStore(key)
         except:
-          quit("failed to open store at $1 ($2)" % [key, getCurrentExceptionMsg()])
+          quit("failed to connect to store at URL $1 ($2)" % [key, getCurrentExceptionMsg()])
       else:
         quit "unhandled argument " & key
     if result.isNil:

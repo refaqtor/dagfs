@@ -1,4 +1,4 @@
-import asyncdispatch, asyncfile, streams, strutils, os, ipld, cbor, multiformats, hex
+import streams, strutils, os, ipld, cbor, multiformats, hex
 
 type
   MissingObject* = ref object of SystemError
@@ -13,30 +13,21 @@ type
   IpldStore* = ref IpldStoreObj
   IpldStoreObj* = object of RootObj
     closeImpl*: proc (s: IpldStore) {.nimcall, gcsafe.}
-    putImpl*: proc (s: IpldStore; blk: string): Cid {.nimcall, gcsafe.}
+    putImpl*: proc (s: IpldStore; blk: string; hash: MultiCodecTag): Cid {.nimcall, gcsafe.}
     getBufferImpl*: proc (s: IpldStore; cid: Cid; buf: pointer; len: Natural): int {.nimcall, gcsafe.}
     getImpl*: proc (s: IpldStore; cid: Cid; result: var string) {.nimcall, gcsafe.}
 
-  AsyncIpldStore* = ref AsyncIpldStoreObj
-  AsyncIpldStoreObj* = object of RootObj
-    closeImpl*: proc (s: AsyncIpldStore) {.nimcall, gcsafe.}
-    putImpl*: proc (s: AsyncIpldStore; blk: string): Future[Cid] {.nimcall, gcsafe.}
-    getImpl*: proc (s: AsyncIpldStore; cid: Cid): Future[string] {.nimcall, gcsafe.}
-
-proc close*(s: IpldStore | AsyncIpldStore) =
+proc close*(s: IpldStore) =
   ## Close active store resources.
   if not s.closeImpl.isNil: s.closeImpl(s)
 
-proc put*(s: IpldStore; blk: string): Cid =
-  ## Place a raw block to the store.
+proc put*(s: IpldStore; blk: string; hash = MulticodecTag.Invalid): Cid =
+  ## Place a raw block to the store. The hash argument specifies a required
+  ## hash algorithm, or defaults to a algorithm choosen by the store
+  ## implementation.
   assert(not s.putImpl.isNil)
   assert(blk.len > 0)
-  s.putImpl(s, blk)
-
-proc put*(s: AsyncIpldStore; blk: string): Future[Cid] =
-  ## Place a raw block to the store.
-  assert(not s.putImpl.isNil)
-  s.putImpl(s, blk)
+  s.putImpl(s, blk, hash)
 
 proc getBuffer*(s: IpldStore; cid: Cid; buf: pointer; len: Natural): int =
   ## Copy a raw block from the store into a buffer pointer.
@@ -58,53 +49,48 @@ proc get*(s: IpldStore; cid: Cid): string =
   result = ""
   s.get(cid, result)
 
-proc get*(s: AsyncIpldStore; cid: Cid): Future[string] =
-  ## Retrieve a raw block from the store.
-  assert cid.isValid
-  assert(not s.getImpl.isNil)
-  s.getImpl(s, cid)
-
-proc putDag*(s: IpldStore; dag: Dag): Cid =
+proc putDag*(s: IpldStore; dag: CborNode): Cid =
   ## Place an IPLD node in the store.
-  assert(not s.putImpl.isNil)
   var raw = dag.toBinary
-  discard s.putImpl(s, raw)
-  raw.CidSha256(MulticodecTag.DagCbor)
+  result = s.put raw
+  result.codec = MulticodecTag.DagCbor
 
-proc getDag*(s: IpldStore; cid: Cid): Dag =
-  ## Retrieve an IPLD node from the store.
-  parseDag s.get(cid)
+proc getDag*(s: IpldStore; cid: Cid): CborNode =
+  ## Retrieve an CBOR DAG from the store.
+  let stream = newStringStream(s.get(cid))
+  result = parseCbor stream
+  close stream
 
 type
   FileStore* = ref FileStoreObj
     ## A store that writes nodes and leafs as files.
   FileStoreObj = object of IpldStoreObj
     root: string
-  AsyncFileStore* = ref AsyncFileStoreObj
-    ## A store that writes nodes and leafs as files.
-  AsyncFileStoreObj = object of AsyncIpldStoreObj
-    root: string
 
-proc parentAndFile(fs: FileStore|AsyncFileStore; cid: Cid): (string, string) =
+proc parentAndFile(fs: FileStore; cid: Cid): (string, string) =
   ## Generate the parent path and file path of CID within the store.
   let digest = hex.encode(cid.digest)
   var hashType: string
   case cid.hash
   of MulticodecTag.Sha2_256:
     hashType = "sha256"
-  of MulticodecTag.Blake2b_512:
-    hashType = "blake2b"
-  of MulticodecTag.Blake2s_256:
-    hashType = "blake2s"
+  of MulticodecTag.Blake2b_256:
+    hashType = "blake2b256"
   else:
     raise newException(SystemError, "unhandled hash type")
   result[0]  = fs.root / hashType / digest[0..1]
   result[1]  = result[0]  / digest[2..digest.high]
 
-proc fsPut(s: IpldStore; blk: string): Cid =
+proc fsPut(s: IpldStore; blk: string; hash: MulticodecTag): Cid =
   var fs = FileStore(s)
-  result = blk.CidSha256
-  let (dir, path) = fs.parentAndFile result
+  case hash:
+  of MulticodecTag.Invalid, MulticodecTag.Blake2b_256:
+    result = blk.CidBlake2b256
+  of MulticodecTag.Sha2_256:
+    result = blk.CidSha256
+  else:
+    raiseAssert("unsupported hash type " & $hash)
+  let (dir, path) = fs.parentAndFile(result)
   if not existsDir dir:
     createDir dir
   if not existsFile path:
@@ -112,21 +98,6 @@ proc fsPut(s: IpldStore; blk: string): Cid =
       tmp = fs.root / "tmp"
     writeFile(tmp, blk)
     moveFile(tmp, path)
-
-proc fsPutAsync(s: AsyncIpldStore; blk: string): Future[Cid] {.async.} =
-  var fs = AsyncFileStore(s)
-  let cid = blk.CidSha256
-  let (dir, path) = fs.parentAndFile cid
-  if not existsDir dir:
-    createDir dir
-  if not existsFile path:
-    let
-      tmp = fs.root / "tmp"
-      file = openAsync(tmp, fmWrite)
-    await file.write(blk)
-    close file
-    moveFile(tmp, path)
-  result = cid
 
 proc fsGetBuffer(s: IpldStore; cid: Cid; buf: pointer; len: Natural): int =
   var fs = FileStore(s)
@@ -161,23 +132,6 @@ proc fsGet(s: IpldStore; cid: Cid; result: var string) =
   else:
     raise cid.newMissingObject
 
-proc fsGetAsync(s: AsyncIpldStore; cid: Cid): Future[string] {.async.} =
-  var fs = AsyncFileStore(s)
-  let (_, path) = fs.parentAndFile cid
-  if existsFile path:
-    let
-      file = openAsync(path, fmRead)
-      blk = await file.readAll()
-    close file
-    if cid.verify(blk):
-      result = blk
-    else:
-      discard tryRemoveFile path
-        # bad block, remove it
-      raise cid.newMissingObject
-  else:
-    raise cid.newMissingObject
-
 proc newFileStore*(root: string): FileStore =
   ## Blocks retrieved by `get` are not hashed and verified.
   if not existsDir(root):
@@ -186,13 +140,4 @@ proc newFileStore*(root: string): FileStore =
   result.putImpl = fsPut
   result.getBufferImpl = fsGetBuffer
   result.getImpl = fsGet
-  result.root = root
-
-proc newAsyncFileStore*(root: string): AsyncFileStore =
-  ## Every block retrieved by `get` is hashed and verified.
-  if not existsDir(root):
-    createDir root
-  new result
-  result.putImpl = fsPutAsync
-  result.getImpl = fsGetAsync
   result.root = root

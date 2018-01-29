@@ -246,8 +246,8 @@ proc addFile*(store: IpldStore; path: string): UnixFsNode =
   let
     fStream = newFileStream(path, fmRead)
     u = newUnixfsFile()
-  for cid, chunk in fStream.simpleChunks:
-    discard store.put(chunk)
+  for chunk in fStream.simpleChunks:
+    let cid = store.put(chunk)
     if u.links.isNil:
       u.links = newSeqOfCap[FileLink](1)
     u.links.add FileLink(cid: cid, size: chunk.len)
@@ -357,42 +357,3 @@ proc readBuffer*(store: IpldStore; file: UnixfsNode; pos: BiggestInt;
           result = n
           break
         filePos.inc linkSize
-
-proc fileStorePath(cid: Cid): string =
-  ## Generate the file path of a CID within the store.
-  assert cid.isValid
-  let digest = hex.encode(cid.digest)
-  var hashType: string
-  case cid.hash
-  of MulticodecTag.Sha2_256:
-    hashType = "sha256"
-  of MulticodecTag.Blake2b_512:
-    hashType = "blake2b"
-  of MulticodecTag.Blake2s_256:
-    hashType = "blake2s"
-  else:
-    raise newException(SystemError, "unhandled hash type")
-  result = hashType / digest[0..1] / digest[2..digest.high]
-
-proc dumpPaths*(paths: var seq[string]; store: IpldStore; cid: Cid) =
-  ## Recursively dump the constituent FileStore chunk files of a CID to a string seq.
-  ## TODO: use CBOR tags rather than reconstitute UnixFS nodes.
-  paths.add cid.fileStorePath
-  if cid.isDagCbor:
-    let u = store.open(cid)
-    case u.kind:
-    of fileNode:
-      assert(not u.links.isNil)
-      for i in 0..u.links.high:
-        paths.add u.links[i].cid.fileStorePath
-    of dirNode:
-      for _, child in u.items:
-        paths.dumpPaths(store, child.cid)
-    else:
-      raiseAssert "cannot dump shallow nodes"
-
-iterator dumpPaths*(store: IpldStore; cid: Cid): string =
-  var collector = newSeq[string]()
-  collector.dumpPaths(store, cid)
-  for p in collector:
-    yield p
