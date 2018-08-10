@@ -1,5 +1,4 @@
-import streams, strutils, os, ipld, cbor, multiformats, hex,
-  ipldstore, ipldclient
+import streams, strutils, os, ../ipld, cbor, ./multiformats, ./store
 
 type
   IpldReplicator* = ref IpldReplicatorObj

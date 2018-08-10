@@ -1,6 +1,6 @@
-import strutils, multiformats, streams, tables, cbor, os, hex, math
+import strutils, multiformats, streams, tables, cbor, os, math
 
-import ipld, ipldstore
+import ../ipld, ./stores
 
 type EntryKey = enum
   typeKey = 1,

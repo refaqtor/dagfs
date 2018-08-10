@@ -2,11 +2,12 @@
 
 version       = "0.1.1"
 author        = "Emery Hemingway"
-description   = "IPLD library"
+description   = "InterPlanetary Linked Data library"
 license       = "GPLv3"
+srcDir        = "src"
 
 # Dependencies
 
-requires "nim >= 0.17.3", "nimSHA2", "base58", "cbor >= 0.2.0"
+requires "nim >= 0.18.1", "nimSHA2", "base58", "cbor >= 0.2.0"
 
-bin = @["ipld/ipldrepl","ipld/ipldcat"]
+bin = @["src/ipld/ipldrepl","src/ipld/ipldcat"]

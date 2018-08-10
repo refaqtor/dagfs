@@ -1,4 +1,6 @@
-import streams, strutils, os, ipld, cbor, multiformats, hex
+import std/streams, std/strutils, std/os
+import cbor
+import ../ipld, ./multiformats, ./priv/hex
 
 type
   MissingObject* = ref object of SystemError

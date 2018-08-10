@@ -1,6 +1,6 @@
 import nre, os, strutils, tables, parseopt, streams, cbor
 
-import ipld, ipldstore, unixfs, multiformats
+import ../ipld, ./stores, ./unixfs, ./multiformats
 
 type
   EvalError = object of SystemError
@@ -232,7 +232,7 @@ proc print(ast: NodeRef; s: Stream) =
 
 proc readAtom(r: Reader): Atom =
   let token = r.next
-  try:
+  block:
     if token[token.low] == '"':
       if token[token.high] != '"':
         newAtomError("invalid string '$1'" % token)
@@ -241,12 +241,12 @@ proc readAtom(r: Reader): Atom =
     elif token.contains DirSep:
       # TODO: memoize this, store a table of paths to atoms
       newAtomPath token
-    elif token.len > 48:
+    elif token.len == 46 or token.len > 48:
       Atom(kind: atomCid, cid: token.parseCid)
     else:
       Atom(kind: atomSymbol, sym: token.normalize)
-  except:
-    newAtomError(getCurrentExceptionMsg())
+  #except:
+   # newAtomError(getCurrentExceptionMsg())
 
 proc readForm(r: Reader): NodeRef
 
@@ -399,7 +399,7 @@ proc lsFunc(env: Env; args: NodeObj): NodeRef =
   result = newNodeList()
   for n in args.walk:
     let a = n.atom
-    if a.cid.isDagCbor:
+    if a.cid.isDag:
         let ufsNode = env.getUnixfs a.cid
         if ufsNode.isDir:
           for name, u in ufsNode.items:
@@ -410,7 +410,7 @@ proc lsFunc(env: Env; args: NodeObj): NodeRef =
             e.append name.newAtomString.newNode
             result.append e
     else:
-      raiseAssert("ls over a raw IPLD block")
+      raiseAssert("ls over " & $a.cid.codec)
 
 proc mapFunc(env: Env; args: NodeObj): NodeRef =
   assertArgCount(args, 2)

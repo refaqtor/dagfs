@@ -1,6 +1,6 @@
 import streams, os, parseopt
 
-import ipfsdaemon, ipldstore, ipld, unixfs
+import ../ipld, ./ipfsdaemon, ./stores, ./unixfs
 
 proc readFile(store: IpldStore; s: Stream; cid: Cid) =
   var chunk = ""

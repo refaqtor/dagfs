@@ -1,6 +1,6 @@
-import httpclient, json, base58.bitcoin, streams, nimSHA2, cbor, tables
+import httpclient, json, base58/bitcoin, streams, nimSHA2, cbor, tables
 
-import ipld, multiformats, ipldstore, unixfs
+import ../ipld, ./multiformats, ./stores, ./unixfs
 
 type
   IpfsStore* = ref IpfsStoreObj
