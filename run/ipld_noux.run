@@ -1,0 +1,152 @@
+# Procedures for generating PDF viewing subsystems
+source ${genode_dir}/repos/ipld/run/pdf.inc
+
+create_boot_directory
+
+set coreutils_cid [ipld_public_untar_depot genodelabs/src/coreutils]
+
+puts "coreutils: $coreutils_cid"
+
+set noux_cid [ipld_public_cid_from_depot genodelabs/pkg/noux genodelabs/src/coreutils]
+
+set merged_cid [ipld_public_merge $coreutils_cid $noux_cid]
+
+set store_paths [ipld_public_dump $merged_cid]
+
+exec sh -c "tar cf [store_tarball_path] -C [public_store_dir] $store_paths"
+
+file delete [store_tarball_link]
+file link -symbolic [store_tarball_link] [store_tarball_path]
+
+###
+
+create_boot_directory
+
+#
+# To use the themed decorator instead of the default one, replace 'pkg/wm'
+# with 'pkg/themed_wm'.
+#
+
+import_from_depot genodelabs/src/[base_src] \
+                  genodelabs/src/init \
+                  genodelabs/src/noux \
+
+append build_components {
+	core init
+	server/ipld_fs_store
+	server/ipld_rom
+	server/ipld_fs
+	noux
+}
+
+build $build_components
+
+append config {
+<config prio_levels="2">
+	<parent-provides>
+		<service name="ROM"/>
+		<service name="IRQ"/>
+		<service name="IO_MEM"/>
+		<service name="IO_PORT"/>
+		<service name="PD"/>
+		<service name="RM"/>
+		<service name="CPU"/>
+		<service name="LOG"/>
+	</parent-provides>
+	<default-route>
+		<any-service> <parent/> <any-child/> </any-service>
+	</default-route>
+	<default caps="100"/>
+
+	<start name="timer">
+		<resource name="RAM" quantum="1M"/>
+		<provides><service name="Timer"/></provides>
+	</start>
+
+	<start name="ipld_store">
+		<binary name="ipld_fs_store"/>
+		<resource name="RAM" quantum="12M"/>
+		<provides> <service name="Ipld"/> </provides>
+		<config>
+			<libc stdout="/log" stderr="/log"/>
+			<vfs> <log/> <tar name="} [store_tarball] {"/> </vfs>
+		</config>
+		<route>
+			<any-service> <parent/> <any-child/> </any-service>
+		</route>
+	</start>
+
+	<start name="ipld_rom">
+		<resource name="RAM" quantum="32M"/>
+		<provides><service name="ROM"/></provides>
+		<config>
+			<libc stdout="/log" stderr="/log"/>
+			<vfs>
+				<log/>
+			</vfs>
+			<default-policy root="}
+append config $merged_cid
+append config {"/>
+		</config>
+		<route>
+			<service name="Ipld"> <child name="ipld_store"/> </service>
+			<any-service> <parent/> <any-child/> </any-service>
+		</route>
+	</start>
+
+	<start name="ipld_fs">
+		<resource name="RAM" quantum="32M"/>
+		<provides><service name="File_system"/></provides>
+		<config>
+			<libc stdout="/log" stderr="/log"/>
+			<vfs>
+				<log/>
+			</vfs>
+			<default-policy root="}
+append config $merged_cid
+append config {"/>
+		</config>
+		<route>
+			<service name="Ipld"> <child name="ipld_store"/> </service>
+			<any-service> <parent/> <any-child/> </any-service>
+		</route>
+	</start>
+	<start name="noux" caps="500">
+		<resource name="RAM" quantum="16M"/>
+		<config verbose="yes" stdin="/dev/null" stdout="/dev/log" stderr="/dev/log">
+			<fstab>
+				<tar name="coreutils.tar"/>
+				<dir name="ipld"> <fs label="ipld"/> </dir>
+				<dir name="dev"> <log/> <null/> </dir>
+			</fstab>
+			<start name="/bin/ls"> <arg value="-Rla"/> </start>
+		</config>
+		<route>
+			<service name="ROM" unscoped_label="ld.lib.so">
+				<parent/> </service>
+			<service name="ROM" label_suffix="ld.lib.so">
+				<parent/> </service>
+			<service name="ROM" unscoped_label="noux">
+				<parent/> </service>
+			<service name="ROM">
+				<child name="ipld_rom"/> </service>
+			<any-service> <parent/> <any-child/> </any-service>
+		</route>
+	</start>
+</config>
+}
+
+install_config $config
+
+append boot_modules {
+	core ld.lib.so init
+	ipld_fs_store
+	ipld_rom
+	ipld_fs
+	libc.lib.so
+	noux
+} [store_tarball] { }
+
+build_boot_image $boot_modules
+
+run_genode_until {child "noux" exited with exit value 0.*\n} 30

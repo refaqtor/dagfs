@@ -1,0 +1,76 @@
+<runtime ram="48M" caps="768" binary="init">
+
+	<provides> <file_system/> <rom/> <ipld/> </provides>
+
+	<requires> <nic/> </requires>
+
+	<content>
+		<rom label="goipfs_proxy"/>
+		<rom label="init"/>
+		<rom label="ipfs_fs"/>
+		<rom label="ipfs_rom"/>
+		<rom label="ld.lib.so"/>
+		<rom label="libc.lib.so"/>
+		<rom label="vfs"/>
+		<rom label="vfs.lib.so"/>
+		<rom label="vfs_lwip.lib.so"/>
+	</content>
+
+	<config>
+		<parent-provides>
+			<service name="CPU"/>
+			<service name="LOG"/>
+			<service name="PD"/>
+			<service name="RM"/>
+			<service name="ROM"/>
+			<service name="Nic"/>
+			<service name="Timer"/>
+		</parent-provides>
+
+		<default-route>
+			<any-service> <parent/> <any-child/> </any-service>
+		</default-route>
+
+		<default caps="128"/>
+
+		<service name="Ipld">
+			<default-policy> <child name="goipfs_proxy"/> </default-policy> </service>
+
+		<service name="ROM">
+			<default-policy> <child name="ipfs_rom"/> </default-policy> </service>
+
+		<service name="File_system">
+			<default-policy> <child name="ipfs_fs"/> </default-policy> </service>
+
+		<start name="goipfs_proxy" caps="512">
+			<resource name="RAM" quantum="32M"/>
+			<provides> <service name="Ipld"/> </provides>
+			<config ipfs_url="http://10.0.1.3:5001">
+				<libc stdout="/log" stderr="/log" socket="/socket"/>
+				<vfs>
+					<log/>
+					<dir name="socket"> <lwip dhcp="yes"/> </dir>
+				</vfs>
+			</config>
+		</start>
+		<start name="ipfs_rom">
+			<resource name="RAM" quantum="8M"/>
+			<provides> <service name="ROM"/> </provides>
+			<config>
+				<libc stdout="/log" stderr="/log"/>
+				<vfs> <log/> </vfs>
+				<default-policy/>
+			</config>
+		</start>
+		<start name="ipfs_fs">
+			<resource name="RAM" quantum="8M"/>
+			<provides> <service name="File_system"/> </provides>
+			<config>
+				<libc stdout="/log" stderr="/log"/>
+				<vfs> <log/> </vfs>
+				<default-policy/>
+			</config>
+		</start>
+	</config>
+
+</runtime>

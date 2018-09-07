@@ -1,0 +1,288 @@
+
+puts "\nTesting connection to local IPFS daemon...\n"
+exec curl http://127.0.0.1:5001/version >& /dev/null
+# If this fails it will crash the script and print an ugly message.
+# The code to handle this condition is just as ugly.
+
+proc depot_user {} { return ehmry }
+
+create_boot_directory
+
+source ${genode_dir}/repos/base/run/platform_drv.inc
+
+set ip_stack "lwip"
+
+#
+# Download test PDF file
+#
+if {![file exist bin/test.pdf]} {
+	set pdf_url "http://genode.org/documentation/genode-foundations-17-05.pdf"
+	catch { exec wget $pdf_url -O bin/test.pdf }
+}
+
+
+source ${genode_dir}/repos/ipfs/run/ipfs.inc
+
+proc pdf_config {} {
+	return {
+<config>
+	<parent-provides>
+		<service name="CPU"/>
+		<service name="LOG"/>
+		<service name="PD"/>
+		<service name="RM"/>
+		<service name="ROM"/>
+		<service name="File_system"/>
+		<service name="Nitpicker"/>
+		<service name="Timer"/>
+	</parent-provides>
+	<default-route>
+		<any-service> <parent/> </any-service>
+	</default-route>
+	<start name="pdf_view" caps="256">
+		<resource name="RAM" quantum="1G"/>
+		<config>
+			<vfs>
+				<fs writeable="no"/>
+				<dir name="dev"> <log/> </dir>
+			</vfs>
+			<libc stdout="/dev/log" stderr="/dev/log"/>
+		</config>
+	</start>
+</config>
+	}
+}
+
+proc pdf_config_cid {} {
+	set configfile [run_dir]/config
+	set fh [open $configfile "WRONLY CREAT TRUNC"]
+	puts $fh [pdf_config]
+	close $fh
+	return [ipfs_ingest $configfile]
+}
+
+set viewer_cid [ipfs_cid_from_depot \
+	[depot_user]/src/init \
+	[depot_user]/pkg/pdf_view \
+]
+
+set pdf_cid [ipfs_ingest bin/test.pdf]
+
+set root_cid [ipfs_merge $viewer_cid [pdf_config_cid] $pdf_cid]
+
+if {$root_cid == ""} {
+	exit -1
+}
+
+puts "root_cid is $root_cid"
+
+append build_components {
+	drivers/nic
+}
+
+build $build_components
+
+set fb_drv "fb_drv"
+
+if {[have_include "image/uefi"]} {
+	set fb_drv "fb_boot_drv"
+}
+
+import_from_depot \
+	[depot_user]/pkg/[drivers_interactive_pkg] \
+	[depot_user]/pkg/wm \
+	[depot_user]/src/[base_src] \
+	[depot_user]/src/goipfs_proxy \
+	[depot_user]/src/init \
+	[depot_user]/src/ipfs_fs \
+	[depot_user]/src/ipfs_rom \
+	[depot_user]/src/ipld_fs_store \
+	[depot_user]/src/ipld_replicate \
+	[depot_user]/src/libc \
+	[depot_user]/src/nitpicker \
+	[depot_user]/src/vfs \
+	[depot_user]/src/vfs_lwip \
+
+append config {
+<config prio_levels="2">
+	<parent-provides>
+		<service name="ROM"/>
+		<service name="IRQ"/>
+		<service name="IO_MEM"/>
+		<service name="IO_PORT"/>
+		<service name="PD"/>
+		<service name="RM"/>
+		<service name="CPU"/>
+		<service name="LOG"/>
+	</parent-provides>
+	<default-route>
+		<any-service> <parent/> <any-child/> </any-service>
+	</default-route>
+	<default caps="100"/>
+
+	<start name="timer">
+		<resource name="RAM" quantum="1M"/>
+		<provides><service name="Timer"/></provides>
+	</start>}
+
+append_platform_drv_config
+
+append_if [have_spec framebuffer] config {
+	<start name="} $fb_drv {" caps="200">
+		<resource name="RAM" quantum="32M"/>
+		<provides><service name="Framebuffer"/></provides>
+	</start>}
+
+append_if [have_spec ps2] config {
+	<start name="ps2_drv">
+		<resource name="RAM" quantum="2M"/>
+		<provides><service name="Input"/></provides>
+	</start>
+	<alias name="input_drv" child="ps2_drv"/>}
+
+append_if [have_spec sdl] config {
+	<start name="fb_sdl" ld="no">
+		<resource name="RAM" quantum="4M"/>
+		<provides> <service name="Input"/> <service name="Framebuffer"/> </provides>
+	</start>
+	<alias name="input_drv" child="fb_sdl"/>}
+
+append config {
+
+	<start name="nic_drv" caps="120" ld="no">
+		<binary name="} [nic_drv_binary] {"/>
+		<resource name="RAM" quantum="8M"/>
+		<provides><service name="Nic"/></provides>
+	</start>
+
+	<start name="ipld_fs_store" caps="512">
+		<resource name="RAM" quantum="32M"/>
+		<provides> <service name="Ipld"/> </provides>
+		<config>
+			<libc stderr="/log"/>
+			<vfs>
+				<log/>
+				<ram/>
+			</vfs>
+		</config>
+		<route>
+			<any-service> <parent/> <any-child/> </any-service>
+		</route>
+	</start>
+
+	<start name="goipfs_proxy" caps="512">
+		<resource name="RAM" quantum="32M"/>
+		<provides> <service name="Ipld"/> </provides>
+		<config ipfs_url="http://10.0.2.1:5001">
+			<libc stdout="/log" stderr="/log" socket="/socket"/>
+			<vfs>
+				<log/>
+				<dir name="socket"> <lwip ip_addr="10.0.2.55" netmask="255.255.255.0" gateway="10.0.2.1"/> </dir>
+			</vfs>
+		</config>
+		<route>
+			<service name="Nic"> <child name="nic_drv"/> </service>
+			<any-service> <parent/> <any-child/> </any-service>
+		</route>
+	</start>
+
+	<start name="ipld_store" caps="512">
+		<binary name="ipld_replicate"/>
+		<resource name="RAM" quantum="16M"/>
+		<provides> <service name="Ipld"/> </provides>
+		<route>
+			<service name="Ipld" label="from"> <child name="goipfs_proxy"/> </service>
+			<service name="Ipld" label="to"> <child name="ipld_fs_store"/> </service>
+			<any-service> <parent/> <any-child/> </any-service>
+		</route>
+	</start>
+
+	<start name="ipfs_rom">
+		<resource name="RAM" quantum="32M"/>
+		<provides><service name="ROM"/></provides>
+		<config>
+			<libc stdout="/log" stderr="/log"/>
+			<vfs>
+				<log/>
+			</vfs>
+			<default-policy/>
+		</config>
+		<route>
+			<service name="Ipld"> <child name="ipld_store"/> </service>
+			<any-service> <parent/> <any-child/> </any-service>
+		</route>
+	</start>
+
+	<start name="ipfs_fs">
+		<resource name="RAM" quantum="32M"/>
+		<provides><service name="File_system"/></provides>
+		<config>
+			<libc stdout="/log" stderr="/log"/>
+			<vfs>
+				<log/>
+			</vfs>
+			<default-policy/>
+		</config>
+		<route>
+			<service name="Ipld"> <child name="ipld_store"/> </service>
+			<any-service> <parent/> <any-child/> </any-service>
+		</route>
+	</start>
+
+	<start name="nitpicker">
+		<resource name="RAM" quantum="4M"/>
+		<provides><service name="Nitpicker"/></provides>
+		<config focus="rom">
+			<domain name="pointer" layer="1" content="client" label="no" origin="pointer" />
+			<domain name="default" layer="2" content="client" label="no" hover="always"/>
+
+			<policy label_prefix="pointer" domain="pointer"/>
+			<default-policy domain="default"/>
+		</config>
+	</start>
+
+	<start name="pointer">
+		<resource name="RAM" quantum="1M"/>
+		<route>
+			<service name="Nitpicker"> <child name="nitpicker"/> </service>
+			<any-service> <parent/> <any-child/> </any-service>
+		</route>
+	</start>
+
+	<start name="} $root_cid {" caps="1024">
+		<binary name="init"/>
+		<resource name="RAM" quantum="64M"/>
+		<route>
+			<service name="ROM" unscoped_label="ld.lib.so">
+				<parent/> </service>
+			<service name="ROM" label_suffix="ld.lib.so">
+				<parent/> </service>
+			<service name="ROM" unscoped_label="init">
+				<parent/> </service>
+			<service name="ROM" unscoped_label="config">
+				<child name="ipfs_rom"/> </service>
+			<service name="ROM">
+				<child name="ipfs_rom"/> </service>
+			<service name="File_system">
+				<child name="ipfs_fs"/> </service>
+			<service name="Nitpicker">
+				<child name="nitpicker" label="pdf"/> </service>
+			<any-service>
+				<parent/> <any-child/>
+			</any-service>
+		</route>
+	</start>
+</config>
+}
+
+install_config $config
+
+set fd [open [run_dir]/genode/focus w]
+puts $fd "<focus label=\"pdf\"/>"
+close $fd
+
+append boot_modules { } [nic_drv_binary] { }
+
+build_boot_image $boot_modules
+
+run_genode_until forever

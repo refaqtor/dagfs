@@ -1,0 +1,30 @@
+source ${genode_dir}/repos/ipld/run/ipfs.inc
+
+if { [info exists ::env(AUDIO_FILE) ] } {
+	set audio_file $::env(AUDIO_FILE) }
+
+set player_cid [ipfs_copy [ipfs_cid_from_depot genodelabs/pkg/audio_player] audio_player init]
+
+set audio_file_name [file tail $audio_file]
+set audio_file_cid [ipfs_ingest "\"$audio_file\""]
+
+set playlist "<playlist><track path=\"/$audio_file_name\"/></playlist>"
+
+set playlist_cid [ipfs_ingest_string "playlist" $playlist]
+
+set player_config {
+<config ld_verbose="yes" state="playing">
+	<report progress="no" playlist="yes"/>
+	<vfs>
+		<dir name="dev"> <log/> </dir>
+		<fs/>
+	</vfs>
+	<libc stdout="/dev/log" stderr="/dev/log"/>
+</config>
+}
+
+set player_config_cid [ipfs_ingest_string "config" $player_config]
+
+set root_cid [ipfs_merge $audio_file_cid $playlist_cid $player_cid $player_config_cid]
+
+puts "\n final root: $root_cid"
