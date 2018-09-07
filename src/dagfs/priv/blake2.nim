@@ -71,6 +71,17 @@ proc compress(c: var Blake2b, last: int = 0) =
       c.hash[i] = c.hash[i] xor v[i] xor v[i+8]
    c.buffer_idx = 0
 
+{.push boundChecks: off.}
+proc blake2b_update*(c: var Blake2b, buf: pointer, data_size: int) =
+  var data = cast[ptr array[0, uint8]](buf)
+  for i in 0..<data_size:
+    if c.buffer_idx == 128:
+      inc(c.offset, c.buffer_idx)
+      compress(c)
+    c.buffer[c.buffer_idx] = data[i]
+    inc(c.buffer_idx)
+{.pop.}
+
 proc blake2b_update*(c: var Blake2b, data: cstring|string|seq|uint8, data_size: int) =
    for i in 0..<data_size:
       if c.buffer_idx == 128:

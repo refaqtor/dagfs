@@ -1,21 +1,22 @@
 import std/streams, std/strutils, std/os
+import std/asyncfile, std/asyncdispatch
 import cbor
 import ../dagfs, ./priv/hex
 
 type
-  MissingObject* = ref object of CatchableError
-    cid*: Cid ## Missing object identifier
-
+  MissingChunk* = ref object of CatchableError
+    cid*: Cid ## Missing chunk identifier
   BufferTooSmall* = object of CatchableError
 
-proc newMissingObject*(cid: Cid): MissingObject =
-  MissingObject(msg: "object missing from store", cid: cid)
+template raiseMissing*(cid: Cid) =
+  raise MissingChunk(msg: "chunk missing from store", cid: cid)
 
 type
   DagfsStore* = ref DagfsStoreObj
   DagfsStoreObj* = object of RootObj
     closeImpl*: proc (s: DagfsStore) {.nimcall, gcsafe.}
-    putImpl*: proc (s: DagfsStore; blk: string): Cid {.nimcall, gcsafe.}
+    putBufferImpl*: proc (s: DagfsStore; buf: pointer; len: Natural): Cid {.nimcall, gcsafe.}
+    putImpl*: proc (s: DagfsStore; chunk: string): Cid {.nimcall, gcsafe.}
     getBufferImpl*: proc (s: DagfsStore; cid: Cid; buf: pointer; len: Natural): int {.nimcall, gcsafe.}
     getImpl*: proc (s: DagfsStore; cid: Cid; result: var string) {.nimcall, gcsafe.}
 
@@ -23,17 +24,24 @@ proc close*(s: DagfsStore) =
   ## Close active store resources.
   if not s.closeImpl.isNil: s.closeImpl(s)
 
-proc put*(s: DagfsStore; blk: string): Cid =
+proc putBuffer*(s: DagfsStore; buf: pointer; len: Natural): Cid =
+  ## Put a chunk into the store.
+  assert(0 < len and len <= maxChunkSize)
+  assert(not s.putBufferImpl.isNil)
+  s.putBufferImpl(s, buf, len)
+
+proc put*(s: DagfsStore; chunk: string): Cid =
   ## Place a raw block to the store. The hash argument specifies a required
   ## hash algorithm, or defaults to a algorithm choosen by the store
   ## implementation.
+  assert(0 < chunk.len and chunk.len <= maxChunkSize)
   assert(not s.putImpl.isNil)
-  assert(blk.len > 0)
-  s.putImpl(s, blk)
+  s.putImpl(s, chunk)
 
 proc getBuffer*(s: DagfsStore; cid: Cid; buf: pointer; len: Natural): int =
   ## Copy a raw block from the store into a buffer pointer.
-  assert cid.isValid
+  assert(cid.isValid)
+  assert(0 < len)
   assert(not s.getBufferImpl.isNil)
   result = s.getBufferImpl(s, cid, buf, len)
   assert(result > 0)
@@ -65,7 +73,7 @@ type
   FileStore* = ref FileStoreObj
     ## A store that writes nodes and leafs as files.
   FileStoreObj = object of DagfsStoreObj
-    root: string
+    root, buf: string
 
 proc parentAndFile(fs: FileStore; cid: Cid): (string, string) =
   ## Generate the parent path and file path of CID within the store.
@@ -73,17 +81,32 @@ proc parentAndFile(fs: FileStore; cid: Cid): (string, string) =
   result[0]  = fs.root / digest[0..1]
   result[1]  = result[0] / digest[2..digest.high]
 
-proc fsPut(s: DagfsStore; blk: string): Cid =
+proc fsPutBuffer(s: DagfsStore; buf: pointer; len: Natural): Cid =
   var fs = FileStore(s)
-  result = dagHash blk
-  if result != zeroBlock:
+  result = dagHash(buf, len)
+  if result != zeroChunk:
+    let (dir, path) = fs.parentAndFile(result)
+    if not existsDir dir:
+      createDir dir
+    if not existsFile path:
+      fs.buf.setLen(len)
+      copyMem(addr fs.buf[0], buf, fs.buf.len)
+      let
+        tmp = fs.root / "tmp"
+      writeFile(tmp, fs.buf)
+      moveFile(tmp, path)
+
+proc fsPut(s: DagfsStore; chunk: string): Cid =
+  var fs = FileStore(s)
+  result = dagHash chunk
+  if result != zeroChunk:
     let (dir, path) = fs.parentAndFile(result)
     if not existsDir dir:
       createDir dir
     if not existsFile path:
       let
         tmp = fs.root / "tmp"
-      writeFile(tmp, blk)
+      writeFile(tmp, chunk)
       moveFile(tmp, path)
 
 proc fsGetBuffer(s: DagfsStore; cid: Cid; buf: pointer; len: Natural): int =
@@ -91,25 +114,25 @@ proc fsGetBuffer(s: DagfsStore; cid: Cid; buf: pointer; len: Natural): int =
   let (_, path) = fs.parentAndFile cid
   if existsFile path:
     let fSize = path.getFileSize
-    if fSize > maxBlockSize:
+    if maxChunkSize < fSize:
       discard tryRemoveFile path
-      raise cid.newMissingObject
-    if fSize > len.int64:
-      raise newException(BufferTooSmall, "")
+      raiseMissing cid
+    if len.int64 < fSize:
+      raise newException(BufferTooSmall, "file is $1 bytes, buffer is $2" % [$fSize, $len])
     let file = open(path, fmRead)
     result = file.readBuffer(buf, len)
     close file
   if result == 0:
-    raise cid.newMissingObject
+    raiseMissing cid
 
 proc fsGet(s: DagfsStore; cid: Cid; result: var string) =
   var fs = FileStore(s)
   let (_, path) = fs.parentAndFile cid
   if existsFile path:
     let fSize = path.getFileSize
-    if fSize > maxBlockSize:
+    if fSize > maxChunkSize:
       discard tryRemoveFile path
-      raise cid.newMissingObject
+      raiseMissing cid
     result.setLen fSize.int
     let
      file = open(path, fmRead)
@@ -117,14 +140,16 @@ proc fsGet(s: DagfsStore; cid: Cid; result: var string) =
     close file
     doAssert(n == result.len)
   else:
-    raise cid.newMissingObject
+    raiseMissing cid
 
 proc newFileStore*(root: string): FileStore =
   ## Blocks retrieved by `get` are not hashed and verified.
   if not existsDir(root):
     createDir root
   new result
+  result.putBufferImpl = fsPutBuffer
   result.putImpl = fsPut
   result.getBufferImpl = fsGetBuffer
   result.getImpl = fsGet
   result.root = root
+  result.buf = ""

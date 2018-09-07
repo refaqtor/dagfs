@@ -4,3 +4,9 @@ ipldrepl
 /genode/dagfs_genode/dagfs_fs
 /genode/dagfs_genode/dagfs_fs_store
 /genode/dagfs_genode/dagfs_rom
+/genode/dagfs_genode/dagfs_tcp_store
+/genode/dagfs_genode/bin/dagfs_fs
+/genode/dagfs_genode/bin/dagfs_fs_store
+/genode/dagfs_genode/bin/dagfs_rom
+/genode/dagfs_genode/bin/dagfs_server
+/genode/dagfs_genode/bin/dagfs_tcp_store

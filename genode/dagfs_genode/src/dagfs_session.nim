@@ -25,7 +25,7 @@ type
     header: "<dagfs_session/dagfs_session.h>".} = object
 
   DagfsOpcode* {.importcpp: "Dagfs::Packet::Opcode".} = enum
-    PUT, GET, INVALID
+    PUT, GET, IDLE, INVALID
 
   DagfsError* {.importcpp: "Dagfs::Packet::Error".} = enum
     OK, MISSING, OVERSIZE, FULL, ERROR

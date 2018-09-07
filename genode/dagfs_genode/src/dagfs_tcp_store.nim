@@ -2,7 +2,7 @@ when not defined(genode):
   {.error: "Genode only module".}
 
 import std/asyncdispatch
-import dagfs/stores, dagfs/tcp
+import ./dagfs_client, dagfs/tcp
 
 when not defined(genode):
   {.error: "Genode only server".}
@@ -10,6 +10,7 @@ when not defined(genode):
 componentConstructHook = proc (env: GenodeEnv) =
   echo "--- Dagfs TCP server ---"
   let
-    store = newFileStore "/"
+    store = env.newDagfsFrontend()
     server = newTcpServer store
   waitFor server.serve()
+  quit "--- Dagfs TCP server died ---"

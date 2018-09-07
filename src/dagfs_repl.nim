@@ -524,8 +524,8 @@ proc eval(ast: NodeRef; env: Env): NodeRef =
     newNodeError(getCurrentExceptionMsg(), input)
   except FieldError:
     newNodeError("invalid argument", input)
-  except MissingObject:
-    newNodeError("object not in store", input)
+  except MissingChunk:
+    newNodeError("chunk not in store", input)
   except OSError:
     newNodeError(getCurrentExceptionMsg(), input)
 

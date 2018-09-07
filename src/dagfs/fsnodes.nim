@@ -1,4 +1,4 @@
-import strutils, streams, tables, cbor, os, math
+import strutils, streams, tables, cbor, os, math, asyncfile, asyncdispatch
 
 import ../dagfs, ./stores
 
@@ -244,13 +244,27 @@ proc lookupFile*(dir: FsNode; name: string): tuple[cid: Cid, size: BiggestInt] =
 proc addFile*(store: DagfsStore; path: string): FsNode =
   ## Add a file to the store and a FsNode.
   let
-    fStream = newFileStream(path, fmRead)
+    file = openAsync(path, fmRead)
+    fileSize = file.getFileSize
     u = newUnixfsFile()
   u.links = newSeqOfCap[FileLink](1)
-  for chunk in fStream.simpleChunks:
-    let cid = store.put(chunk)
-    u.links.add FileLink(cid: cid, size: chunk.len)
-    u.size.inc chunk.len
+  var
+    buf = newString(min(maxChunKSize, fileSize))
+    pos = 0
+  let shortLen = fileSize mod maxChunKSize
+  if 0 < shortLen:
+    buf.setLen shortLen
+      # put the short chunck first
+  while true:
+    let n = waitFor file.readBuffer(buf[0].addr, buf.len)
+    buf.setLen n
+    let cid = store.put(buf)
+    u.links.add FileLink(cid: cid, size: buf.len)
+    u.size.inc buf.len
+    pos.inc n
+    if pos >= fileSize: break
+    buf.setLen maxChunkSize
+  close file
   if u.size == 0:
     # return the CID for a raw nothing
     u.cid = dagHash("")
@@ -261,7 +275,6 @@ proc addFile*(store: DagfsStore; path: string): FsNode =
     else:
       u.cid = store.putDag(u.toCbor)
   result = u
-  close fStream
 
 proc addDir*(store: DagfsStore; dirPath: string): FsNode =
   var dRoot = newFsRoot()
@@ -288,7 +301,7 @@ proc openDir*(store: DagfsStore; cid: Cid): FsNode =
   assert cid.isValid
   var raw = ""
   try: store.get(cid, raw)
-  except MissingObject: raise cid.newMissingObject
+  except MissingChunk: raiseMissing cid
     # this sucks
   result = parseFs(raw, cid)
   assert(result.kind == dirNode)

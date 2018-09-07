@@ -39,7 +39,7 @@ namespace Dagfs {
  */
 struct Dagfs::Packet final : Genode::Packet_descriptor
 {
-	enum Opcode { PUT, GET, INVALID };
+	enum Opcode { PUT, GET, IDLE, INVALID };
 
 	enum Error {
 		OK,       /* put or get success */
@@ -60,7 +60,7 @@ struct Dagfs::Packet final : Genode::Packet_descriptor
 	Packet(Packet p, Cid cid, Opcode op)
 	:
 		Genode::Packet_descriptor(p.offset(), p.size()),
-		_cid(cid),  _length(p.size()), _op(op), _err(OK)
+		_cid(cid),  _length(p.length()), _op(op), _err(OK)
 	{ }
 
 	Packet(Cid cid, Genode::size_t length,

@@ -58,7 +58,7 @@ type
   SessionObj = object
     sig: SignalHandler
     cpp: FsSessionComponent
-    store: DagfsClient
+    store: DagfsFrontend
     label: string
     rootDir: FsNode
     next: Handle
@@ -112,8 +112,8 @@ proc inode(cid: Cid): culong = hash(cid).culong
 
 template fsRpc(session: SessionPtr; body: untyped) =
   try: body
-  except MissingObject:
-    let e = (MissingObject)getCurrentException()
+  except MissingChunk:
+    let e = (MissingChunk)getCurrentException()
     echo "Synchronous RPC failure, missing object ", e.cid
     raiseLookupFailed()
   except:
@@ -231,7 +231,7 @@ proc processPacket(session: SessionRef; pkt: var FsPacket) =
     if pkt.operation == READ:
       let
         node = session.nodes[pkt.handle]
-        pktBuf = cast[ptr array[maxBlockSize, char]](session.cpp.packetContent pkt)
+        pktBuf = cast[ptr array[maxChunkSize, char]](session.cpp.packetContent pkt)
           # cast the pointer to an array pointer for indexing
       case node.kind
       of fileNode:
@@ -297,7 +297,7 @@ proc processPacket(session: SessionRef; pkt: var FsPacket) =
       else:
         echo "ignoring ", pkt.operation, " packet from ", session.label
 
-proc newSession(env: GenodeEnv; store: DagfsClient; label: string; root: FsNode; txBufSize: int): SessionRef =
+proc newSession(env: GenodeEnv; store: DagfsFrontend; label: string; root: FsNode; txBufSize: int): SessionRef =
   proc construct(cpp: FsSessionComponent; env: GenodeEnv; txBufSize: int; state: SessionPtr; cap: SignalContextCapability) {.
     importcpp.}
   let session = new SessionRef
@@ -323,10 +323,10 @@ componentConstructHook = proc(env: GenodeEnv) =
   var
     policies = newSeq[XmlNode](8)
     sessions = initTable[ServerId, SessionRef]()
-  let store = env.newDagfsClient()
+  let store = env.newDagfsFrontend()
     ## The Dagfs session client backing File_system sessions.
 
-  proc createSession(env: GenodeEnv; store: DagfsClient; id: ServerId; label, rootPath: string; rootCid: Cid; txBufSize: int) =
+  proc createSession(env: GenodeEnv; store: DagfsFrontend; id: ServerId; label, rootPath: string; rootCid: Cid; txBufSize: int) =
     var ufsRoot: FsNode
     try: ufsRoot = store.openDir(rootCid)
     except: ufsRoot = nil
@@ -420,4 +420,5 @@ componentConstructHook = proc(env: GenodeEnv) =
     configRom = env.newRomHandler("config", processConfig)
   process configRom
   process sessionsRom
-echo "initial rom contents processed"
+
+  env.parent.announce "File_system"

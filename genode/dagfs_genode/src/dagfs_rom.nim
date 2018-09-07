@@ -68,7 +68,7 @@ proc readFile(store: DagfsStore; s: Stream; file: FsNode) =
 
 componentConstructHook = proc(env: GenodeEnv) =
   var
-    store = env.newDagfsClient()
+    store = env.newDagfsFrontend()
     policies = newSeq[XmlNode](8)
     sessions = initTable[ServerId, Session]()
 
@@ -104,8 +104,8 @@ componentConstructHook = proc(env: GenodeEnv) =
   proc createSession(env: GenodeEnv; id: ServerId; label: string; rootCid: Cid) =
     var cap = RomSessionCapability()
     try: cap = createSessionNoTry(id, label, rootCid)
-    except MissingObject:
-      let e = (MissingObject)getCurrentException()
+    except MissingChunk:
+      let e = (MissingChunk)getCurrentException()
       echo "cannot resolve '", label, "', ", e.cid, " is missing"
     except:
       echo "unhandled exception while resolving '", label, "', ",

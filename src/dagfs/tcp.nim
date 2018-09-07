@@ -1,15 +1,55 @@
-import std/asyncnet, std/asyncdispatch, std/streams, cbor
+import std/asyncnet, std/asyncdispatch, std/streams
 import ../dagfs, ./stores
 
-proc toInt(chars: openArray[char]): BiggestInt =
+const
+  defaultPort = Port(1023)
+
+proc toInt(chars: openArray[char]): int32 =
   for c in chars.items:
-    result = (result shl 8) or c.BiggestInt
+    result = (result shl 8) or c.int32
+
+const maxErrorLen = 128
+
+type
+  Tag = enum
+    errTag = 0'i16
+    getTag = 1
+    putTag = 2
+
+  MessageBody = object {.union.}
+    error: array[maxErrorLen, char]
+    putLen: int32
+  Message = object {.packed.}
+    len: int32
+    cid: Cid
+    tag: Tag
+    body: MessageBody
 
 const
-  defaultPort = Port(1024)
-  errTag = toInt "err"
-  getTag = toInt "get"
-  putTag = toInt "put"
+  errMsgBaseSize = 4 + cidSize + 2
+  getMsgSize = 4 + cidSize + 2
+  putMsgSize = 4 + cidSize + 2 + 4
+  minMsgSize = getMsgSize
+  maxMsgSize = 4 + cidSize + maxErrorLen
+
+when isMainModule:
+  doAssert(maxMsgSize == sizeof(msg))
+  
+proc `$`(msg: Message): string =
+  result = "[" & $msg.cid & "]["
+  case msg.tag
+  of errTag:
+    result.add "err]["
+    let n = clamp(msg.len - errMsgBaseSize, 0, maxErrorLen)
+    for i in 0..<n:
+      result.add msg.body.error[i]
+    result.add "]"
+  of getTag:
+    result.add "get]"
+  of putTag:
+    result.add "put]["
+    result.add $msg.body.putLen
+    result.add "]"
 
 type
   TcpServer* = ref TcpServerObj
@@ -19,80 +59,93 @@ type
 
 proc newTcpServer*(store: DagfsStore; port = defaultPort): TcpServer =
   ## Create a new TCP server that serves `store`.
-  result = TcpServer(sock: newAsyncSocket(buffered=false), store: store)
-  result.sock.bindAddr(port, "127.0.0.1")
-  result.sock.setSockOpt(OptReuseAddr, true)
-    # some braindead unix cruft
+  result = TcpServer(sock: newAsyncSocket(buffered=true), store: store)
+  result.sock.bindAddr(port)
+  echo "listening on port ", port.int
 
-proc process(server: TcpServer; client: AsyncSocket) {.async.} =
-  ## Process messages from a TCP client.
+proc send(sock: AsyncSocket; msg: ptr Message): Future[void] =
+  sock.send(msg, msg.len.int)
+
+proc recv(sock: AsyncSocket; msg: ptr Message) {.async.} =
+  msg.len = 0
+  var n = await sock.recvInto(msg, 4)
+  if minMsgSize <= msg.len and msg.len <= maxMsgSize:
+    n = await sock.recvInto(addr msg.cid, msg.len-4)
+  if n < minMsgSize-4:
+    close sock
+    #zeroMem(msg, errMsgBaseSize)
+
+proc sendError(sock: AsyncSocket; cid: Cid; str: string): Future[void] =
   var
-    tmpBuf = ""
-    blkBuf = ""
-  block loop:
-    while not client.isClosed:
-      block:
-        tmpBuf.setLen(256)
-        let n = await client.recvInto(addr tmpBuf[0], tmpBuf.len)
-        if n < 40: break loop
-        tmpBuf.setLen n
-      let
-        tmpStream = newStringStream(tmpBuf)
-        cmd = parseCbor tmpStream
-      when defined(tcpDebug):
-        echo "C: ", cmd
-      if cmd.kind != cborArray or cmd.seq.len < 3: break loop
-      case cmd[0].getInt
-      of errTag:
-        break loop
-      of getTag:
-        let
-          cid = cmd[1].toCid
-          resp = newCborArray()
-        try:
-          server.store.get(cid, blkBuf)
-          resp.add(putTag)
-          resp.add(cmd[1])
-          resp.add(blkBuf.len)
-          when defined(tcpDebug):
-            echo "S: ", resp
-          await client.send(encode resp)
-          await client.send(blkBuf)
-        except:
-          resp.add(errTag)
-          resp.add(cmd[1])
-          resp.add(getCurrentExceptionMsg())
-          when defined(tcpDebug):
-            echo "S: ", resp
-          await client.send(encode resp)
-      of putTag:
-          # TODO: check if the block is already in the store
-        let resp = newCborArray()
-        resp.add(newCborInt getTag)
-        resp.add(cmd[1])
-        resp.add(cmd[2])
+    msg = Message(tag: errTag)
+    str = str
+    strLen = min(msg.body.error.len, str.len)
+    msgLen = errMsgBaseSize + strLen
+  msg.len = msgLen.int32
+  copyMem(msg.body.error[0].addr, str[0].addr, strLen)
+  when defined(tcpDebug):
+    debugEcho "S: ", msg
+  sock.send(addr msg)
+
+proc process(server: TcpServer; host: string; client: AsyncSocket) {.async.} =
+  ## Process messages from a TCP client.
+  echo host, " connected"
+  var
+    msg: Message
+    chunk = ""
+  try:
+    block loop:
+      while not client.isClosed:
+        await client.recv(addr msg)
         when defined(tcpDebug):
-          echo "S: ", resp
-        await client.send(encode resp)
-        doAssert(cmd[2].getInt <= maxBlockSize)
-        tmpBuf.setLen cmd[2].getInt
-        blkBuf.setLen 0
-        while blkBuf.len < cmd[2].getInt:
-          let n = await client.recvInto(tmpBuf[0].addr, tmpBuf.len)
-          if n == 0: break loop
-          tmpBuf.setLen n
-          blkBuf.add tmpBuf
-        let cid = server.store.put(blkBuf)
-        doAssert(cid == cmd[1].toCid)
-      else: break loop
-  close client
+          debugEcho "C: ", msg
+        case msg.tag
+        of errTag:
+          echo host, ": ", $msg
+          break loop
+        of getTag:
+          try:
+            server.store.get(msg.cid, chunk)
+            msg.len = putMsgSize
+            msg.tag = putTag
+            msg.body.putLen = chunk.len.int32
+            when defined(tcpDebug):
+              debugEcho "S: ", msg
+            await client.send(addr msg)
+            await client.send(chunk)
+          except:
+            msg.tag = errTag
+            await client.sendError(msg.cid, getCurrentExceptionMsg())
+        of putTag:
+            # TODO: check if the block is already in the store
+          if maxChunkSize < msg.body.putLen:
+            await client.sendError(msg.cid, "maximum chunk size is " & $maxChunkSize)
+            break
+          chunk.setLen msg.body.putLen
+          msg.len = getMsgSize
+          msg.tag = getTag
+          when defined(tcpDebug):
+            debugEcho "S: ", msg
+          await client.send(addr msg)
+          let n = await client.recvInto(chunk[0].addr, chunk.len)
+          if n != chunk.len:
+            break loop
+          let cid = server.store.put(chunk)
+          if cid != msg.cid:
+            await client.sendError(msg.cid, "put CID mismatch")
+        else:
+          break loop
+  except: discard
+  if not client.isClosed:
+    close client
+  echo host, " closed"
 
 proc serve*(server: TcpServer) {.async.} =
   ## Service client connections to server.
   listen server.sock
   while not server.sock.isClosed:
     let (host, sock) = await server.sock.acceptAddr()
-    asyncCheck server.process(sock)
+    asyncCheck server.process(host, sock)
 
 proc close*(server: TcpServer) =
   ## Close a TCP server.
@@ -104,78 +157,102 @@ type
     sock: AsyncSocket
     buf: string
 
-proc tcpClientPut(s: DagfsStore; blk: string): Cid =
+proc tcpClientPutBuffer(s: DagfsStore; buf: pointer; len: Natural): Cid =
   var client = TcpClient(s)
-  result = dagHash blk
-  if result != zeroBlock:
+  result = dagHash(buf, len)
+  if result != zeroChunk:
+    var msg: Message
     block put:
-      let cmd = newCborArray()
-      cmd.add(newCborInt putTag)
-      cmd.add(toCbor result)
-      cmd.add(newCborInt blk.len)
+      msg.len = putMsgSize
+      msg.cid = result
+      msg.tag = putTag
+      msg.body.putLen = len.int32
       when defined(tcpDebug):
-        echo "C: ", cmd
-      waitFor client.sock.send(encode cmd)
+        debugEcho "C: ", msg
+      waitFor client.sock.send(addr msg)
     block get:
-      let
-        respBuf = waitFor client.sock.recv(256)
-        s = newStringStream(respBuf)
-        resp = parseCbor s
+      waitFor client.sock.recv(addr msg)
       when defined(tcpDebug):
-        echo "S: ", resp
-      case resp[0].getInt
+        debugEcho "S: ", msg
+      case msg.tag
       of getTag:
-        if resp[1] == result:
-          waitFor client.sock.send(blk)
+        if msg.cid == result:
+          waitFor client.sock.send(buf, len)
         else:
           close client.sock
           raiseAssert "server sent out-of-order \"get\" message"
       of errTag:
-        raiseAssert resp[2].getText
+        raiseAssert $msg
+      else:
+        raiseAssert "invalid server message"
+
+proc tcpClientPut(s: DagfsStore; chunk: string): Cid =
+  var client = TcpClient(s)
+  result = dagHash chunk
+  if result != zeroChunk:
+    var msg: Message
+    block put:
+      msg.len = putMsgSize
+      msg.cid = result
+      msg.tag = putTag
+      msg.body.putLen = chunk.len.int32
+      when defined(tcpDebug):
+        debugEcho "C: ", msg
+      waitFor client.sock.send(addr msg)
+    block get:
+      waitFor client.sock.recv(addr msg)
+      when defined(tcpDebug):
+        debugEcho "S: ", msg
+      case msg.tag
+      of getTag:
+        if msg.cid == result:
+          waitFor client.sock.send(chunk)
+        else:
+          close client.sock
+          raiseAssert "server sent out-of-order \"get\" message"
+      of errTag:
+        raiseAssert $msg
       else:
         raiseAssert "invalid server message"
 
 proc tcpClientGetBuffer(s: DagfsStore; cid: Cid; buf: pointer; len: Natural): int =
-  assert(getTag != 0)
-  var client = TcpClient(s)
+  var
+    client = TcpClient(s)
+    msg: Message
   block get:
-    let cmd = newCborArray()
-    cmd.add(newCborInt getTag)
-    cmd.add(toCbor cid)
-    cmd.add(newCborInt len)
+    msg.len = getMsgSize
+    msg.cid = cid
+    msg.tag = getTag
     when defined(tcpDebug):
-      echo "C: ", cmd
-    waitFor client.sock.send(encode cmd)
+      debugEcho "C: ", msg
+    waitFor client.sock.send(addr msg)
   block put:
-    let
-      respBuf = waitFor client.sock.recv(256, {Peek})
-      s = newStringStream(respBuf)
-      resp = parseCbor s
-      skip = s.getPosition
+    waitFor client.sock.recv(addr msg)
     when defined(tcpDebug):
-      echo "S: ", resp
-    case resp[0].getInt
+      debugEcho "S: ", msg
+    case msg.tag
     of putTag:
-      doAssert(resp[1] == cid)
-      result = resp[2].getInt.int
-      doAssert(skip <= len and result <= len)
-      discard waitFor client.sock.recvInto(buf, skip)
-      result = waitFor client.sock.recvInto(buf, result)
+      doAssert(msg.cid == cid)
+      result = msg.body.putLen.int
+      doAssert(result <= len)
+      let n = waitFor client.sock.recvInto(buf, result)
+      doAssert(n == result)
     of errTag:
-      raise MissingObject(msg: resp[2].getText, cid: cid)
+      raise MissingChunk(msg: $msg, cid: cid)
     else:
-      raise cid.newMissingObject
+      raiseMissing cid
 
 proc tcpClientGet(s: DagfsStore; cid: Cid; result: var string) =
-  result.setLen maxBlockSize
+  result.setLen maxChunkSize
   let n = s.getBuffer(cid, result[0].addr, result.len)
   result.setLen n
   assert(result.dagHash == cid)
 
 proc newTcpClient*(host: string; port = defaultPort): TcpClient =
   new result
-  result.sock = waitFor asyncnet.dial(host, port, buffered=false)
+  result.sock = waitFor asyncnet.dial(host, port, buffered=true)
   result.buf = ""
+  result.putBufferImpl = tcpClientPutBuffer
   result.putImpl = tcpClientPut
   result.getBufferImpl = tcpClientGetBuffer
   result.getImpl = tcpClientGet

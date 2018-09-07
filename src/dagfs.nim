@@ -3,13 +3,15 @@ import base58/bitcoin, cbor
 import ./dagfs/priv/hex, ./dagfs/priv/blake2
 
 const
-  maxBlockSize* = 1 shl 18
-    ## Maximum supported block size.
+  maxChunkSize* = 1 shl 18
+    ## Maximum supported chunk size.
   digestLen* = 32
-    ## Length of a block digest.
+    ## Length of a chunk digest.
+  cidSize* = digestLen
+    ## Size of CID object in memory
 
 type Cid* = object
-  ## Content IDentifier, used to identify blocks.
+  ## Chunk IDentifier
   digest*: array[digestLen, uint8]
 
 proc initCid*(): Cid = Cid()
@@ -102,17 +104,26 @@ proc parseCid*(s: string): Cid =
     result.digest[i] = raw[i].byte
 
 const
-  zeroBlock* = parseCid "8ddb61928ec76e4ee904cd79ed977ab6f5d9187f1102975060a6ba6ce10e5481"
-    ## CID of zero block of maximum size.
+  zeroChunk* = parseCid "8ddb61928ec76e4ee904cd79ed977ab6f5d9187f1102975060a6ba6ce10e5481"
+    ## CID of zero chunk of maximum size.
 
 proc take*(cid: var Cid; buf: var string) =
   ## Take a raw digest from a string buffer.
   doAssert(buf.len == digestLen)
   copyMem(cid.digest[0].addr, buf[0].addr, digestLen)
 
+proc dagHash*(buf: pointer; len: Natural): Cid =
+  ## Generate a CID for a string of data using the BLAKE2b hash algorithm.
+  assert(len <= maxChunkSize)
+  var b: Blake2b
+  blake2b_init(b, digestLen, nil, 0)
+  blake2b_update(b, buf, len)
+  var s = blake2b_final(b)
+  copyMem(result.digest[0].addr, s[0].addr, digestLen)
+
 proc dagHash*(data: string): Cid =
   ## Generate a CID for a string of data using the BLAKE2b hash algorithm.
-  assert(data.len <= maxBlockSize)
+  assert(data.len <= maxChunkSize)
   var b: Blake2b
   blake2b_init(b, digestLen, nil, 0)
   blake2b_update(b, data, data.len)
@@ -130,9 +141,9 @@ proc verify*(cid: Cid; data: string): bool =
       return false
   true
 
-iterator simpleChunks*(s: Stream; size = maxBlockSize): string =
+iterator simpleChunks*(s: Stream; size = maxChunkSize): string =
   ## Iterator that breaks a stream into simple chunks.
-  doAssert(size <= maxBlockSize)
+  doAssert(size <= maxChunkSize)
   var tmp = newString(size)
   while not s.atEnd:
     tmp.setLen(size)
