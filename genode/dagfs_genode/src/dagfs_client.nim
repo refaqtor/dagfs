@@ -3,12 +3,12 @@ when not defined(genode):
 
 import cbor, genode, std/tables, std/strutils
 
-import dagfs, dagfs/stores, dagfs/genode/dagfs_session
+import dagfs, dagfs/stores, ./dagfs_session
 
 const
   currentPath = currentSourcePath.rsplit("/", 1)[0]
   dagfsClientH = currentPath & "/dagfs_client.h"
-{.passC: "-I" & currentPath & "/../../../genode/include".}
+{.passC: "-I" & currentPath & "/../../include".}
 
 type
   DagfsClientBase {.importcpp, header: dagfsClientH.} = object
@@ -44,7 +44,7 @@ proc releasePacket(cpp: DagfsClientCpp; pkt: DagfsPacket) {.
 type
   DagfsClient* = ref DagfsClientObj
   DagfsClientObj = object of DagfsStoreObj
-    ## IPLD session client
+    ## Dagfs session client
     cpp: DagfsClientCpp
 
 proc icClose(s: DagfsStore) =

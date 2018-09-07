@@ -1,2 +1,6 @@
 nimcache
 ipldrepl
+/dagfs_repl
+/genode/dagfs_genode/dagfs_fs
+/genode/dagfs_genode/dagfs_fs_store
+/genode/dagfs_genode/dagfs_rom

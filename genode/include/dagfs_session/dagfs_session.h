@@ -11,8 +11,8 @@
  * under the terms of the GNU Affero General Public License version 3.
  */
 
-#ifndef _INCLUDE__DAGFS_SESSION__DAGFS_SESSION_H_
-#define _INCLUDE__DAGFS_SESSION__DAGFS_SESSION_H_
+#ifndef _DAGFS_SESSION_H_
+#define _DAGFS_SESSION_H_
 
 #include <packet_stream_tx/packet_stream_tx.h>
 #include <session/session.h>
@@ -119,4 +119,4 @@ struct Dagfs::Session : Genode::Session
 	GENODE_RPC_INTERFACE(Rpc_tx_cap);
 };
 
-#endif /* _INCLUDE__DAGFS_SESSION__DAGFS_SESSION_H_ */
+#endif /* _DAGFS_SESSION_H_ */

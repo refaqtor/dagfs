@@ -1,3 +1,16 @@
+#
+# \brief  Dagfs session definitions
+# \author Emery Hemingway
+# \date   2017-11-11
+#
+
+#
+# Copyright (C) 2017 Genode Labs GmbH
+#
+# This file is part of the Genode OS framework, which is distributed
+# under the terms of the GNU Affero General Public License version 3.
+#
+
 import dagfs
 
 const MaxPacketSize* = 1 shl 18;

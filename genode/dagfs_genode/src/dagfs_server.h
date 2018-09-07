@@ -1,5 +1,5 @@
 /*
- * \brief  IPLD C++ session component
+ * \brief  Dagfs C++ session component
  * \author Emery Hemingway
  * \date   2017-11-07
  */
@@ -11,10 +11,10 @@
  * under the terms of the GNU Affero General Public License version 3.
  */
 
-#ifndef _INCLUDE__NIM__IPLDSERVER_H_
-#define _INCLUDE__NIM__IPLDSERVER_H_
+#ifndef _INCLUDE__NIM__DAGFS_SERVER_H_
+#define _INCLUDE__NIM__DAGFS_SERVER_H_
 
-#include <ipld_session/rpc_object.h>
+#include <dagfs_session/rpc_object.h>
 #include <base/heap.h>
 #include <base/attached_ram_dataspace.h>
 
@@ -28,8 +28,8 @@ struct Communication_buffer
 	: _tx_ds(pd, rm, tx_buf_size) { }
 };
 
-struct IpldSessionComponentBase : Communication_buffer,
-                                  Ipld::Session_rpc_object
+struct DagfsSessionComponentBase : Communication_buffer,
+                                  Dagfs::Session_rpc_object
 {
 	static Genode::size_t tx_buf_size(char const *args)
 	{
@@ -40,7 +40,7 @@ struct IpldSessionComponentBase : Communication_buffer,
 		return buf_size;
 	}
 
-	IpldSessionComponentBase(Genode::Env *env, char const *args)
+	DagfsSessionComponentBase(Genode::Env *env, char const *args)
 	:
 		Communication_buffer(env->pd(), env->rm(), tx_buf_size(args)),
 		Session_rpc_object(env->rm(), env->ep().rpc_ep(), _tx_ds.cap())
@@ -53,4 +53,4 @@ struct IpldSessionComponentBase : Communication_buffer,
 	}
 };
 
-#endif /* _INCLUDE__NIM__IPLDSERVER_H_ */
+#endif /* _INCLUDE__NIM__DAGFS_SERVER_H_ */

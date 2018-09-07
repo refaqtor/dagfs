@@ -1,5 +1,5 @@
 #
-# \brief  IPLD server factory
+# \brief  Dagfs server factory
 # \author Emery Hemingway
 # \date   2017-11-11
 #
@@ -13,24 +13,26 @@
 
 import std/strtabs, std/tables, std/xmltree, std/strutils
 
-import cbor, genode, genode/signals, genode/servers, ipld, ipld/store, ipldsession
+import cbor, genode, genode/signals, genode/servers, genode/parents,
+  dagfs, dagfs/stores, ./dagfs_session
 
 const
   currentPath = currentSourcePath.rsplit("/", 1)[0]
-  ipldserverH = currentPath & "/ipldserver.h"
+  dagfsserverH = currentPath & "/dagfs_server.h"
+{.passC: "-I" & currentPath & "/../../include".}
 
 type
-  IpldSessionComponentBase {.importcpp, header: ipldserverH.} = object
-  SessionCpp = Constructible[IpldSessionComponentBase]
+  DagfsSessionComponentBase {.importcpp, header: dagfsserverH.} = object
+  SessionCpp = Constructible[DagfsSessionComponentBase]
   Session = ref object
     cpp: SessionCpp
     sig: SignalHandler
-    store: IpldStore
-    id: SessionId
+    store: DagfsStore
+    id: ServerId
     label: string
 
-proc processPacket(session: Session; pkt: var IpldPacket) =
-  proc packetContent(cpp: SessionCpp; pkt: IpldPacket): pointer {.
+proc processPacket(session: Session; pkt: var DagfsPacket) =
+  proc packetContent(cpp: SessionCpp; pkt: DagfsPacket): pointer {.
     importcpp: "#->sink().packet_content(@)".}
   let cid = pkt.cid
   case pkt.operation
@@ -40,7 +42,7 @@ proc processPacket(session: Session; pkt: var IpldPacket) =
         pktBuf = session.cpp.packetContent pkt
         heapBuf = newString pkt.len
       copyMem(heapBuf[0].addr, pktBuf, heapBuf.len)
-      let putCid = session.store.put(heapBuf, cid.hash)
+      let putCid = session.store.put(heapBuf)
       assert(putCid.isValid, "server packet returned invalid CID from put")
       pkt.setCid putCid
     except:
@@ -63,7 +65,7 @@ proc processPacket(session: Session; pkt: var IpldPacket) =
     echo "invalid packet operation"
     pkt.setError ERROR
 
-proc newSession(env: GenodeEnv; store: IpldStore; id: SessionId; label, args: string): Session =
+proc newSession(env: GenodeEnv; store: DagfsStore; id: ServerId; label, args: string): Session =
   ## Create a new session and packet handling procedure
   let session = new Session
   assert(not session.isNil)
@@ -78,11 +80,11 @@ proc newSession(env: GenodeEnv; store: IpldStore; id: SessionId; label, args: st
     proc readyToAck(cpp: SessionCpp): bool {.
       importcpp: "#->sink().ready_to_ack()".}
     while session.cpp.packetAvail and session.cpp.readyToAck:
-      proc getPacket(cpp: SessionCpp): IpldPacket {.
+      proc getPacket(cpp: SessionCpp): DagfsPacket {.
         importcpp: "#->sink().get_packet()".}
       var pkt = session.cpp.getPacket()
       session.processPacket pkt
-      proc acknowledgePacket(cpp: SessionCpp; pkt: IpldPacket) {.
+      proc acknowledgePacket(cpp: SessionCpp; pkt: DagfsPacket) {.
         importcpp: "#->sink().acknowledge_packet(@)".}
       session.cpp.acknowledgePacket(pkt)
 
@@ -91,9 +93,9 @@ proc newSession(env: GenodeEnv; store: IpldStore; id: SessionId; label, args: st
   session.cpp.packetHandler(session.sig.cap)
   result = session
 
-proc manage(ep: Entrypoint; s: Session): IpldSessionCapability =
+proc manage(ep: Entrypoint; s: Session): DagfsSessionCapability =
   ## Manage a session from the default entrypoint.
-  proc manage(ep: Entrypoint; cpp: SessionCpp): IpldSessionCapability {.
+  proc manage(ep: Entrypoint; cpp: SessionCpp): DagfsSessionCapability {.
     importcpp: "#.manage(*#)".}
   result = ep.manage(s.cpp)
   GC_ref s
@@ -108,35 +110,35 @@ proc dissolve(ep: Entrypoint; s: Session) =
   GC_unref s
 
 type
-  IpldServer* = ref object
+  DagfsServer* = ref object
     env: GenodeEnv
-    store*: IpldStore
-    sessions*: Table[SessionId, Session]
+    store*: DagfsStore
+    sessions*: Table[ServerId, Session]
 
-proc newIpldServer*(env: GenodeEnv; store: IpldStore): IpldServer =
-  IpldServer(
+proc newDagfsServer*(env: GenodeEnv; store: DagfsStore): DagfsServer =
+  DagfsServer(
     env: env, store: store,
-    sessions: initTable[SessionId, Session]())
+    sessions: initTable[ServerId, Session]())
 
-proc create*(server: IpldServer; id: SessionId; label, args: string) =
+proc create*(server: DagfsServer; id: ServerId; label, args: string) =
   if not server.sessions.contains id:
     try:
       let
         session = newSession(server.env, server.store, id, label, args)
         cap = server.env.ep.manage(session)
       server.sessions[id] = session
-      proc deliverSession(env: GenodeEnv; id: SessionId; cap: IpldSessionCapability) {.
+      proc deliverSession(env: GenodeEnv; id: ServerId; cap: DagfsSessionCapability) {.
         importcpp: "#->parent().deliver_session_cap(Genode::Parent::Server::Id{#}, #)".}
       server.env.deliverSession(id, cap)
       echo "session opened for ", label
     except:
       echo "failed to create session for '", label, "', ", getCurrentExceptionMsg()
-      server.env.sessionResponseDeny id
+      server.env.parent.sessionResponseDeny id
 
-proc close*(server: IpldServer; id: SessionId) =
-  ## Close a session at the IPLD server.
+proc close*(server: DagfsServer; id: ServerId) =
+  ## Close a session at the Dagfs server.
   if server.sessions.contains id:
     let session = server.sessions[id]
     server.env.ep.dissolve(session)
     server.sessions.del id
-    server.env.sessionResponseClose id
+    server.env.parent.sessionResponseClose id

@@ -11,8 +11,11 @@
  * under the terms of the GNU Affero General Public License version 3.
  */
 
+#ifndef _DAGFS_CLIENT_H_
+#define _DAGFS_CLIENT_H_
+
 /* Genode includes */
-#include <dagfs_session/connection.h>
+#include "../../include/dagfs_session/connection.h"
 #include <base/heap.h>
 
 struct DagfsClientBase
@@ -26,3 +29,5 @@ struct DagfsClientBase
       conn(*env, tx_packet_alloc, label, tx_buf_size)
 	{ }
 };
+
+#endif /* _DAGFS_CLIENT_H_ */
