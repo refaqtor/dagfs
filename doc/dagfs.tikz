@@ -1,0 +1,101 @@
+\begin{tikzpicture}
+
+	\definecolor{dagfscolor}       {rgb}{.7,0.6,1}
+	\definecolor{rumpcolor}       {rgb}{1,0.6,0.6}
+
+	\tikzstyle{treenode} = [component, path fading=flow fade,
+	                        minimum width=10ex, minimum height=7ex, align=center,
+	                        rounded corners=1]
+	\tikzstyle{dagfsnode} = [treenode, bottom color=dagfscolor]
+
+
+	\tikzstyle{subsystem} = [minimum width=10ex, minimum height=3ex, align=center,
+	                         draw=black!80, fill=white, fill opacity=0.6]
+
+	\tikzstyle{treesessionarrow} = [arrow, thick, densely dashed]
+
+	\tikzstyle{treesessionarrow} = [arrow, thick, densely dashed]
+
+	%
+	% Components
+	%
+
+	% Dagfs components
+	\node[dagfsnode,
+		minimum width=20ex,
+		minimum height=11ex]
+		(dagfs_server) {};
+
+	\path (dagfs_server.west) node[right=1ex] {Dagfs};
+
+	\path (dagfs_server.east) node[
+		left=2ex, yshift=2ex, subsystem, align=center] (frontends)
+		{Frontends};
+
+	\path (dagfs_server.east) node[
+		left=2ex, yshift=-2ex, subsystem, align=center] (backends)
+		{Backends};
+
+
+	\node[dagfsnode, below=8ex of dagfs_server]
+		(dagfs_fs_store) {Dagfs FS store};
+
+	\node[treenode,
+		right=8ex of dagfs_fs_store,
+		minimum height=12ex, bottom color=rumpcolor, rounded corners=1]
+		(rump) {Rump\\Ext2};
+
+	\node[dagfsnode, above=8ex of dagfs_server, xshift=-16ex] (dagfs_tcp_server) {Dagfs TCP server};
+	\node[dagfsnode, above=8ex of dagfs_server, xshift=12ex] (dagfs_fs)         {Dagfs FS};
+	\node[dagfsnode, right=2ex of dagfs_fs] (dagfs_rom)        {Dagfs ROM};
+
+	%
+	% Linux VM
+	%
+	\node[treenode, minimum width=24ex, minimum height=22ex, above=8ex of dagfs_tcp_server] (linux) {};
+	\path (linux.north) node[below=1ex] {Linux VM};
+
+
+	%
+	% Sessions
+	%
+	\draw[treesessionarrow] (dagfs_fs_store.90)
+		.. controls +(270:-4ex) and +(270:4ex) ..
+		node[right, sloped=false] {}
+		(backends.270);
+
+	\draw[treesessionarrow] (dagfs_tcp_server.270)
+		.. controls +(270:4ex) and +(270:-7ex) ..
+		node[right, sloped=false] {}
+		(frontends.135);
+
+	\draw[treesessionarrow] (dagfs_fs.270)
+		.. controls +(270:4ex) and +(270:-8ex) ..
+		node[right, sloped=false] {}
+		(frontends.90);
+
+	\draw[treesessionarrow] (dagfs_rom.270)
+		.. controls +(270:4ex) and +(270:-7ex) ..
+		node[right, sloped=false] {}
+		(frontends.45);
+
+	\draw[treesessionarrow] (dagfs_fs_store) --
+		node[below, align=center, sloped=false] {File\\system} (rump);
+
+	%
+	% TCP
+	%
+
+	\node[draw,
+		dropshadow, path fading=flow fade, shape=double arrow,
+		below=5ex of linux,
+		yshift=1ex,
+		draw opacity=0.5,
+		rotate=90,
+		double arrow head extend=1ex,
+		inner xsep=2ex, inner ysep=1ex]
+		(arrow) {};
+
+	\path (arrow.east) node[yshift=-3ex, right=2ex] {TCP/IP};
+
+\end{tikzpicture}
